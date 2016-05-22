@@ -642,6 +642,10 @@ case ${target} in
     "" | yes | posix) thread_file='posix' ;;
   esac
   ;;
+*-*-dennix*)
+  gas=yes
+  gnu_ld=yes
+  ;;
 *-*-dragonfly*)
   gas=yes
   gnu_ld=yes
@@ -1412,6 +1416,12 @@ x86_64-*-darwin*)
 	with_cpu=${with_cpu:-core2}
 	tmake_file="${tmake_file} ${cpu_type}/t-darwin64 t-slibgcc"
 	tm_file="${tm_file} ${cpu_type}/darwin64.h"
+	;;
+i[34567]86-*-dennix*)
+	tm_file="${tm_file} i386/unix.h i386/att.h dbxelf.h elfos.h newlib-stdint.h i386/i386elf.h dennix.h"
+	;;
+x86_64-*-dennix*)
+	tm_file="${tm_file} i386/unix.h i386/att.h dbxelf.h elfos.h newlib-stdint.h i386/i386elf.h i386/x86-64.h dennix.h"
 	;;
 i[34567]86-*-elfiamcu)
 	tm_file="${tm_file} i386/unix.h i386/att.h dbxelf.h elfos.h newlib-stdint.h i386/iamcu.h"
