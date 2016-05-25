@@ -6466,6 +6466,8 @@ c_stddef_cpp_builtins(void)
   builtin_define_with_value ("__CHAR32_TYPE__", CHAR32_TYPE, 0);
   if (SIG_ATOMIC_TYPE)
     builtin_define_with_value ("__SIG_ATOMIC_TYPE__", SIG_ATOMIC_TYPE, 0);
+  if (SSIZE_TYPE)
+    builtin_define_with_value ("__SSIZE_TYPE__", SSIZE_TYPE, 0);
   if (INT8_TYPE)
     builtin_define_with_value ("__INT8_TYPE__", INT8_TYPE, 0);
   if (INT16_TYPE)

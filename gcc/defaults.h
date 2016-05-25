@@ -663,6 +663,10 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #define SIG_ATOMIC_TYPE ((const char *) NULL)
 #endif
 
+#ifndef SSIZE_TYPE
+#define SSIZE_TYPE ((const char*) NULL)
+#endif
+
 #ifndef INT8_TYPE
 #define INT8_TYPE ((const char *) NULL)
 #endif

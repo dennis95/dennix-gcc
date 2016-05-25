@@ -22,3 +22,6 @@
     builtin_assert ("system=unix"); \
     builtin_assert ("system=posix"); \
   } while(0);
+
+#undef SSIZE_TYPE
+#define SSIZE_TYPE "long signed int"
