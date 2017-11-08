@@ -3460,7 +3460,12 @@ fi
 
 # Default local prefix if it is empty
 if test x$local_prefix = x; then
-	local_prefix=/usr/local
+  case "${target}" in
+    *-*-dennix*)
+      local_prefix=/local ;;
+    *)
+      local_prefix=/usr/local ;;
+  esac
 fi
 
 
@@ -18453,7 +18458,7 @@ else
   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
   lt_status=$lt_dlunknown
   cat > conftest.$ac_ext <<_LT_EOF
-#line 18456 "configure"
+#line 18461 "configure"
 #include "confdefs.h"
 
 #if HAVE_DLFCN_H
@@ -18559,7 +18564,7 @@ else
   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
   lt_status=$lt_dlunknown
   cat > conftest.$ac_ext <<_LT_EOF
-#line 18562 "configure"
+#line 18567 "configure"
 #include "confdefs.h"
 
 #if HAVE_DLFCN_H

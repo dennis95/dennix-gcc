@@ -118,7 +118,12 @@ esac])
 
 # Default local prefix if it is empty
 if test x$local_prefix = x; then
-	local_prefix=/usr/local
+  case "${target}" in
+    *-*-dennix*)
+      local_prefix=/local ;;
+    *)
+      local_prefix=/usr/local ;;
+  esac
 fi
 
 AC_ARG_WITH([native-system-header-dir],
