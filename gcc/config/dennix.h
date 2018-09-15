@@ -25,3 +25,6 @@
 
 #undef SSIZE_TYPE
 #define SSIZE_TYPE "long signed int"
+
+#undef WCHAR_TYPE
+#define WCHAR_TYPE "unsigned int"
