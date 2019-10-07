@@ -1435,6 +1435,12 @@ AC_DEFUN([GLIBCXX_ENABLE_LIBSTDCXX_TIME], [
         ac_has_nanosleep=yes
         ac_has_sched_yield=yes
         ;;
+      dennix*)
+        ac_has_clock_monotonic=yes
+        ac_has_clock_realtime=yes
+        ac_has_nanosleep=yes
+        ac_has_sched_yield=yes
+        ;;
       gnu* | linux* | kfreebsd*-gnu | knetbsd*-gnu)
         AC_MSG_CHECKING([for at least GNU libc 2.17])
         AC_TRY_COMPILE(
