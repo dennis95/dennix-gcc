@@ -1099,6 +1099,14 @@ AC_CHECK_HEADER(pthread.h, [have_pthread_h=yes], [have_pthread_h=])
 
 # These tests can't be done till we know if we have limits.h.
 gcc_AC_C_CHAR_BIT
+
+case "${target}" in
+  *-*-dennix*)
+    # autoconf does not properly detect endianness on Dennix. Assume little endian.
+    export ac_cv_c_bigendian=no
+    ;;
+esac
+
 AC_C_BIGENDIAN
 
 # ----------------------

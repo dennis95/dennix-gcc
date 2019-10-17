@@ -455,8 +455,8 @@ recompile_files (void)
 {
   file *f;
 
-  putenv (xstrdup ("COMPILER_PATH="));
-  putenv (xstrdup ("LIBRARY_PATH="));
+  setenv("COMPILER_PATH", "", 1);
+  setenv("LIBRARY_PATH", "", 1);
 
   while ((f = file_pop ()) != NULL)
     {

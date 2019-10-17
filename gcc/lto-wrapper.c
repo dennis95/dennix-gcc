@@ -1412,8 +1412,8 @@ cont:
 	    {
 	      /* Avoid passing --jobserver-fd= and similar flags 
 		 unless jobserver mode is explicitly enabled.  */
-	      putenv (xstrdup ("MAKEFLAGS="));
-	      putenv (xstrdup ("MFLAGS="));
+	      setenv("MAKEFLAGS", "", 1);
+	      setenv("MFLAGS", "", 1);
 	    }
 	  new_argv[0] = getenv ("MAKE");
 	  if (!new_argv[0])
