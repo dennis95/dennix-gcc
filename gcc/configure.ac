@@ -211,6 +211,14 @@ esac])
 if test x${gcc_gxx_include_dir} = x; then
   if test x${enable_version_specific_runtime_libs} = xyes; then
     gcc_gxx_include_dir='${libsubdir}/include/c++'
+  elif test -z "${target%%*-dennix*}"; then
+    # libstdc++ is usually built as part of gcc. However libstdc++ depends on
+    # libc which needs gcc to be built. Therefore on Dennix we don't build
+    # libstdc++ as part of gcc but instead install libstdc++ into the sysroot.
+    # For this we need to tell gcc to look into the sysroot for libstdc++
+    # headers. Note that this means that libstdc++ headers installed as part of
+    # gcc will not be found by gcc.
+    gcc_gxx_include_dir="$with_sysroot/include/c++/\$(version)"
   else
     libstdcxx_incdir='include/c++/$(version)'
     if test x$host != x$target; then
