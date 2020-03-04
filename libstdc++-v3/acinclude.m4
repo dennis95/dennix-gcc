@@ -1684,10 +1684,10 @@ AC_DEFUN([GLIBCXX_CHECK_C99_TR1], [
   AC_LANG_SAVE
   AC_LANG_CPLUSPLUS
 
-  # Use -std=c++98 because the default (-std=gnu++98) leaves __STRICT_ANSI__
+  # Use -std=c++11 because the default (-std=gnu++14) leaves __STRICT_ANSI__
   # undefined and fake C99 facilities may be spuriously enabled.
   ac_save_CXXFLAGS="$CXXFLAGS"
-  CXXFLAGS="$CXXFLAGS -std=c++98"
+  CXXFLAGS="$CXXFLAGS -std=c++11"
 
   # Check for the existence of <complex.h> complex math functions used
   # by tr1/complex.
