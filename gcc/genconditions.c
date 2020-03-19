@@ -1,5 +1,5 @@
 /* Process machine description and calculate constant conditions.
-   Copyright (C) 2001-2016 Free Software Foundation, Inc.
+   Copyright (C) 2001-2019 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -50,6 +50,7 @@ write_header (void)
 /* Generated automatically by the program `genconditions' from the target\n\
    machine description file.  */\n\
 \n\
+#define IN_TARGET_CODE 1\n\
 #include \"bconfig.h\"\n\
 #define INCLUDE_STRING\n\
 #include \"system.h\"\n\
@@ -67,11 +68,13 @@ write_header (void)
 #undef ENABLE_RTL_FLAG_CHECKING\n\
 #undef ENABLE_GC_CHECKING\n\
 #undef ENABLE_GC_ALWAYS_COLLECT\n\
+#define USE_ENUM_MODES\n\
 \n\
 #include \"coretypes.h\"\n\
 #include \"tm.h\"\n\
 #include \"insn-constants.h\"\n\
 #include \"rtl.h\"\n\
+#include \"memmodel.h\"\n\
 #include \"tm_p.h\"\n\
 #include \"hard-reg-set.h\"\n\
 #include \"function.h\"\n\
@@ -123,7 +126,7 @@ write_one_condition (void **slot, void * ARG_UNUSED (dummy))
   const struct c_test *test = * (const struct c_test **) slot;
   const char *p;
 
-  print_md_ptr_loc (test->expr);
+  rtx_reader_ptr->print_md_ptr_loc (test->expr);
   fputs ("  { \"", stdout);
   for (p = test->expr; *p; p++)
     {
@@ -138,9 +141,9 @@ write_one_condition (void **slot, void * ARG_UNUSED (dummy))
     }
 
   fputs ("\",\n    __builtin_constant_p ", stdout);
-  print_c_condition (test->expr);
+  rtx_reader_ptr->print_c_condition (test->expr);
   fputs ("\n    ? (int) ", stdout);
-  print_c_condition (test->expr);
+  rtx_reader_ptr->print_c_condition (test->expr);
   fputs ("\n    : -1 },\n", stdout);
   return 1;
 }
@@ -212,7 +215,7 @@ write_writer (void)
 }
 
 int
-main (int argc, char **argv)
+main (int argc, const char **argv)
 {
   progname = "genconditions";
 

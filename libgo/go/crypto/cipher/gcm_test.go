@@ -8,7 +8,11 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"io"
+	"reflect"
 	"testing"
 )
 
@@ -184,6 +188,35 @@ var aesGCMTests = []struct {
 		"0feccdfae8ed65fa31a0858a1c466f79e8aa658c2f3ba93c3f92158b4e30955e1c62580450beff",
 		"b69a7e17bb5af688883274550a4ded0d1aff49a0b18343f4b382f745c163f7f714c9206a32a1ff012427e19431951edd0a755e5f491b0eedfd7df68bbc6085dd2888607a2f998c3e881eb1694109250db28291e71f4ad344a125624fb92e16ea9815047cd1111cabfdc9cb8c3b4b0f40aa91d31774009781231400789ed545404af6c3f76d07ddc984a7bd8f52728159782832e298cc4d529be96d17be898efd83e44dc7b0e2efc645849fd2bba61fef0ae7be0dcab233cc4e2b7ba4e887de9c64b97f2a1818aa54371a8d629dae37975f7784e5e3cc77055ed6e975b1e5f55e6bbacdc9f295ce4ada2c16113cd5b323cf78b7dde39f4a87aa8c141a31174e3584ccbd380cf5ec6d1dba539928b084fa9683e9c0953acf47cc3ac384a2c38914f1da01fb2cfd78905c2b58d36b2574b9df15535d82",
 	},
+	// These cases test non-standard tag sizes.
+	{
+		"89c54b0d3bc3c397d5039058c220685f",
+		"bc7f45c00868758d62d4bb4d",
+		"582670b0baf5540a3775b6615605bd05",
+		"48d16cda0337105a50e2ed76fd18e114",
+		"fc2d4c4eee2209ddbba6663c02765e6955e783b00156f5da0446e2970b877f",
+	},
+	{
+		"bad6049678bf75c9087b3e3ae7e72c13",
+		"a0a017b83a67d8f1b883e561",
+		"a1be93012f05a1958440f74a5311f4a1",
+		"f7c27b51d5367161dc2ff1e9e3edc6f2",
+		"36f032f7e3dc3275ca22aedcdc68436b99a2227f8bb69d45ea5d8842cd08",
+	},
+	{
+		"66a3c722ccf9709525650973ecc100a9",
+		"1621d42d3a6d42a2d2bf9494",
+		"61fa9dbbed2190fbc2ffabf5d2ea4ff8",
+		"d7a9b6523b8827068a6354a6d166c6b9",
+		"fef3b20f40e08a49637cc82f4c89b8603fd5c0132acfab97b5fff651c4",
+	},
+	{
+		"562ae8aadb8d23e0f271a99a7d1bd4d1",
+		"f7a5e2399413b89b6ad31aff",
+		"bbdc3504d803682aa08a773cde5f231a",
+		"2b9680b886b3efb7c6354b38c63b5373",
+		"e2b7e5ed5ff27fc8664148f5a628a46dcbf2015184fffb82f2651c36",
+	},
 }
 
 func TestAESGCM(t *testing.T) {
@@ -197,9 +230,29 @@ func TestAESGCM(t *testing.T) {
 		nonce, _ := hex.DecodeString(test.nonce)
 		plaintext, _ := hex.DecodeString(test.plaintext)
 		ad, _ := hex.DecodeString(test.ad)
-		aesgcm, err := cipher.NewGCMWithNonceSize(aes, len(nonce))
-		if err != nil {
-			t.Fatal(err)
+		tagSize := (len(test.result) - len(test.plaintext)) / 2
+
+		var aesgcm cipher.AEAD
+		switch {
+		// Handle non-standard nonce sizes
+		case tagSize != 16:
+			aesgcm, err = cipher.NewGCMWithTagSize(aes, tagSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+		// Handle non-standard tag sizes
+		case len(nonce) != 12:
+			aesgcm, err = cipher.NewGCMWithNonceSize(aes, len(nonce))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+		default:
+			aesgcm, err = cipher.NewGCM(aes)
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		ct := aesgcm.Seal(nil, nonce, plaintext, ad)
@@ -241,6 +294,19 @@ func TestAESGCM(t *testing.T) {
 	}
 }
 
+func TestGCMInvalidTagSize(t *testing.T) {
+	key, _ := hex.DecodeString("ab72c77b97cb5fe9a382d9fe81ffdbed")
+
+	aes, _ := aes.NewCipher(key)
+
+	for _, tagSize := range []int{0, 1, aes.BlockSize() + 1} {
+		aesgcm, err := cipher.NewGCMWithTagSize(aes, tagSize)
+		if aesgcm != nil || err == nil {
+			t.Fatalf("NewGCMWithNonceAndTagSize was successful with an invalid %d-byte tag size", tagSize)
+		}
+	}
+}
+
 func TestTagFailureOverwrite(t *testing.T) {
 	// The AESNI GCM code decrypts and authenticates concurrently and so
 	// overwrites the output buffer before checking the authentication tag.
@@ -271,6 +337,160 @@ func TestTagFailureOverwrite(t *testing.T) {
 	for i := range dst {
 		if dst[i] != 0 {
 			t.Fatal("Failed Open didn't zero dst buffer")
+		}
+	}
+}
+
+func TestGCMCounterWrap(t *testing.T) {
+	// Test that the last 32-bits of the counter wrap correctly.
+	tests := []struct {
+		nonce, tag string
+	}{
+		{"0fa72e25", "37e1948cdfff09fbde0c40ad99fee4a7"},   // counter: 7eb59e4d961dad0dfdd75aaffffffff0
+		{"afe05cc1", "438f3aa9fee5e54903b1927bca26bbdf"},   // counter: 75d492a7e6e6bfc979ad3a8ffffffff4
+		{"9ffecbef", "7b88ca424df9703e9e8611071ec7e16e"},   // counter: c8bb108b0ecdc71747b9d57ffffffff5
+		{"ffc3e5b3", "38d49c86e0abe853ac250e66da54c01a"},   // counter: 706414d2de9b36ab3b900a9ffffffff6
+		{"cfdd729d", "e08402eaac36a1a402e09b1bd56500e8"},   // counter: cd0b96fe36b04e750584e56ffffffff7
+		{"010ae3d486", "5405bb490b1f95d01e2ba735687154bc"}, // counter: e36c18e69406c49722808104fffffff8
+		{"01b1107a9d", "939a585f342e01e17844627492d44dbf"}, // counter: e6d56eaf9127912b6d62c6dcffffffff
+	}
+	key, err := aes.NewCipher(make([]byte, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext := make([]byte, 16*17+1)
+	for i, test := range tests {
+		nonce, _ := hex.DecodeString(test.nonce)
+		want, _ := hex.DecodeString(test.tag)
+		aead, err := cipher.NewGCMWithNonceSize(key, len(nonce))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := aead.Seal(nil, nonce, plaintext, nil)
+		if !bytes.Equal(got[len(plaintext):], want) {
+			t.Errorf("test[%v]: got: %x, want: %x", i, got[len(plaintext):], want)
+		}
+		_, err = aead.Open(nil, nonce, got, nil)
+		if err != nil {
+			t.Errorf("test[%v]: authentication failed", i)
+		}
+	}
+}
+
+var _ cipher.Block = (*wrapper)(nil)
+
+type wrapper struct {
+	block cipher.Block
+}
+
+func (w *wrapper) BlockSize() int          { return w.block.BlockSize() }
+func (w *wrapper) Encrypt(dst, src []byte) { w.block.Encrypt(dst, src) }
+func (w *wrapper) Decrypt(dst, src []byte) { w.block.Decrypt(dst, src) }
+
+// wrap wraps the Block interface so that it does not fulfill
+// any optimizing interfaces such as gcmAble.
+func wrap(b cipher.Block) cipher.Block {
+	return &wrapper{b}
+}
+
+func TestGCMAsm(t *testing.T) {
+	// Create a new pair of AEADs, one using the assembly implementation
+	// and one using the generic Go implementation.
+	newAESGCM := func(key []byte) (asm, generic cipher.AEAD, err error) {
+		block, err := aes.NewCipher(key[:])
+		if err != nil {
+			return nil, nil, err
+		}
+		asm, err = cipher.NewGCM(block)
+		if err != nil {
+			return nil, nil, err
+		}
+		generic, err = cipher.NewGCM(wrap(block))
+		if err != nil {
+			return nil, nil, err
+		}
+		return asm, generic, nil
+	}
+
+	// check for assembly implementation
+	var key [16]byte
+	asm, generic, err := newAESGCM(key[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.TypeOf(asm) == reflect.TypeOf(generic) {
+		t.Skipf("no assembly implementation of GCM")
+	}
+
+	// generate permutations
+	type pair struct{ align, length int }
+	lengths := []int{0, 156, 8192, 8193, 8208}
+	keySizes := []int{16, 24, 32}
+	alignments := []int{0, 1, 2, 3}
+	if testing.Short() {
+		keySizes = []int{16}
+		alignments = []int{1}
+	}
+	perms := make([]pair, 0)
+	for _, l := range lengths {
+		for _, a := range alignments {
+			if a != 0 && l == 0 {
+				continue
+			}
+			perms = append(perms, pair{align: a, length: l})
+		}
+	}
+
+	// run test for all permutations
+	test := func(ks int, pt, ad []byte) error {
+		key := make([]byte, ks)
+		if _, err := io.ReadFull(rand.Reader, key); err != nil {
+			return err
+		}
+		asm, generic, err := newAESGCM(key)
+		if err != nil {
+			return err
+		}
+		if _, err := io.ReadFull(rand.Reader, pt); err != nil {
+			return err
+		}
+		if _, err := io.ReadFull(rand.Reader, ad); err != nil {
+			return err
+		}
+		nonce := make([]byte, 12)
+		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+			return err
+		}
+		want := generic.Seal(nil, nonce, pt, ad)
+		got := asm.Seal(nil, nonce, pt, ad)
+		if !bytes.Equal(want, got) {
+			return errors.New("incorrect Seal output")
+		}
+		got, err = asm.Open(nil, nonce, want, ad)
+		if err != nil {
+			return errors.New("authentication failed")
+		}
+		if !bytes.Equal(pt, got) {
+			return errors.New("incorrect Open output")
+		}
+		return nil
+	}
+	for _, a := range perms {
+		ad := make([]byte, a.align+a.length)
+		ad = ad[a.align:]
+		for _, p := range perms {
+			pt := make([]byte, p.align+p.length)
+			pt = pt[p.align:]
+			for _, ks := range keySizes {
+				if err := test(ks, pt, ad); err != nil {
+					t.Error(err)
+					t.Errorf("	key size: %v", ks)
+					t.Errorf("	plaintext alignment: %v", p.align)
+					t.Errorf("	plaintext length: %v", p.length)
+					t.Errorf("	additionalData alignment: %v", a.align)
+					t.Fatalf("	additionalData length: %v", a.length)
+				}
+			}
 		}
 	}
 }

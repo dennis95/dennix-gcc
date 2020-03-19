@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2016 Free Software Foundation, Inc.
+/* Copyright (C) 2015-2019 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -21,8 +21,8 @@
    see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
    <http://www.gnu.org/licenses/>.  */
 
-#if !defined _X86INTRIN_H_INCLUDED
-# error "Never use <pkuintrin.h> directly; include <x86intrin.h> instead."
+#if !defined _IMMINTRIN_H_INCLUDED
+# error "Never use <pkuintrin.h> directly; include <immintrin.h> instead."
 #endif
 
 #ifndef _PKUINTRIN_H_INCLUDED
@@ -36,16 +36,16 @@
 
 extern __inline unsigned int
 __attribute__((__gnu_inline__, __always_inline__, __artificial__))
-_rdpkru_u32(void)
+_rdpkru_u32 (void)
 {
   return __builtin_ia32_rdpkru ();
 }
 
 extern __inline void
 __attribute__((__gnu_inline__, __always_inline__, __artificial__))
-_wrpkru(unsigned int key)
+_wrpkru (unsigned int __key)
 {
-  return __builtin_ia32_wrpkru (key);
+  __builtin_ia32_wrpkru (__key);
 }
 
 #ifdef __DISABLE_PKU__

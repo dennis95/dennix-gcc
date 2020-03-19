@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2016, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2019, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -413,7 +413,7 @@ package body Exp_Ch2 is
         and then (Is_Atomic (E) or else Is_Atomic (Etype (E)))
       then
          declare
-            Set  : Boolean;
+            Set : Boolean;
 
          begin
             --  If variable is atomic, but type is not, setting depends on

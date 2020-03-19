@@ -6,7 +6,7 @@
  *                                                                          *
  *                          C Implementation File                           *
  *                                                                          *
- *                     Copyright (C) 2001-2015, AdaCore                     *
+ *                     Copyright (C) 2001-2019, AdaCore                     *
  *                                                                          *
  * GNAT is free software;  you can  redistribute it  and/or modify it under *
  * terms of the  GNU General Public License as published  by the Free Soft- *
@@ -265,7 +265,7 @@ __gnat_expect_poll (int *fd,
 	  if ((status & 1) != 1)
 	    {
               ready = -1;
-              dead_process = i + 1;
+              *dead_process = i + 1;
               return ready;
 	    }
 	}
@@ -388,7 +388,9 @@ __gnat_expect_poll (int *fd,
   int max_fd = 0;
   int ready;
   int i;
+#ifdef __hpux__
   int received;
+#endif
 
   *dead_process = 0;
 
@@ -413,14 +415,18 @@ __gnat_expect_poll (int *fd,
 
     if (ready > 0)
       {
+#ifdef __hpux__
 	received = 0;
+#endif
 
         for (i = 0; i < num_fd; i++)
 	  {
 	    if (FD_ISSET (fd[i], &rset))
 	      {
 		is_set[i] = 1;
+#ifdef __hpux__
 		received = 1;
+#endif
 	      }
 	    else
 	      is_set[i] = 0;
@@ -444,7 +450,7 @@ __gnat_expect_poll (int *fd,
 	            if (ei.request == TIOCCLOSE)
 		      {
 		        ioctl (fd[i], TIOCREQSET, &ei);
-                        dead_process = i + 1;
+                        *dead_process = i + 1;
 		        return -1;
 		      }
 

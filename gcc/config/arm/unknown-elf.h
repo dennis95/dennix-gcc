@@ -1,5 +1,5 @@
 /* Definitions for non-Linux based ARM systems using ELF
-   Copyright (C) 1998-2016 Free Software Foundation, Inc.
+   Copyright (C) 1998-2019 Free Software Foundation, Inc.
    Contributed by Catherine Moore <clm@cygnus.com>
 
    This file is part of GCC.
@@ -88,13 +88,9 @@
     }									\
   while (0)
 
-#ifndef SUBTARGET_CPU_DEFAULT
-#define SUBTARGET_CPU_DEFAULT 		TARGET_CPU_arm7tdmi
-#endif
-
 /* The libgcc udivmod functions may throw exceptions.  If newlib is
    configured to support long longs in I/O, then printf will depend on
    udivmoddi4, which will depend on the exception unwind routines,
    which will depend on abort, which is defined in libc.  */ 
 #undef LINK_GCC_C_SEQUENCE_SPEC
-#define LINK_GCC_C_SEQUENCE_SPEC "--start-group %G %L --end-group"
+#define LINK_GCC_C_SEQUENCE_SPEC "--start-group %G %{!nolibc:%L} --end-group"

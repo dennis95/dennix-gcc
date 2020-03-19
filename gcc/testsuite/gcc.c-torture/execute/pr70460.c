@@ -1,3 +1,7 @@
+/* { dg-require-effective-target indirect_jumps } */
+/* { dg-require-effective-target label_values } */
+/* { dg-skip-if "label differences not supported" { avr-*-* } } */
+
 /* PR rtl-optimization/70460 */
 
 int c;

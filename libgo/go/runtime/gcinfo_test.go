@@ -21,14 +21,46 @@ const (
 func TestGCInfo(t *testing.T) {
 	t.Skip("skipping on gccgo for now")
 
-	verifyGCInfo(t, "stack Ptr", new(Ptr), infoPtr)
-	verifyGCInfo(t, "stack ScalarPtr", new(ScalarPtr), infoScalarPtr)
-	verifyGCInfo(t, "stack PtrScalar", new(PtrScalar), infoPtrScalar)
-	verifyGCInfo(t, "stack BigStruct", new(BigStruct), infoBigStruct())
-	verifyGCInfo(t, "stack string", new(string), infoString)
-	verifyGCInfo(t, "stack slice", new([]string), infoSlice)
-	verifyGCInfo(t, "stack eface", new(interface{}), infoEface)
-	verifyGCInfo(t, "stack iface", new(Iface), infoIface)
+	{
+		var x Ptr
+		verifyGCInfo(t, "stack Ptr", &x, infoPtr)
+		runtime.KeepAlive(x)
+	}
+	{
+		var x ScalarPtr
+		verifyGCInfo(t, "stack ScalarPtr", &x, infoScalarPtr)
+		runtime.KeepAlive(x)
+	}
+	{
+		var x PtrScalar
+		verifyGCInfo(t, "stack PtrScalar", &x, infoPtrScalar)
+		runtime.KeepAlive(x)
+	}
+	{
+		var x BigStruct
+		verifyGCInfo(t, "stack BigStruct", &x, infoBigStruct())
+		runtime.KeepAlive(x)
+	}
+	{
+		var x string
+		verifyGCInfo(t, "stack string", &x, infoString)
+		runtime.KeepAlive(x)
+	}
+	{
+		var x []string
+		verifyGCInfo(t, "stack slice", &x, infoSlice)
+		runtime.KeepAlive(x)
+	}
+	{
+		var x interface{}
+		verifyGCInfo(t, "stack eface", &x, infoEface)
+		runtime.KeepAlive(x)
+	}
+	{
+		var x Iface
+		verifyGCInfo(t, "stack iface", &x, infoIface)
+		runtime.KeepAlive(x)
+	}
 
 	for i := 0; i < 10; i++ {
 		verifyGCInfo(t, "heap Ptr", escape(new(Ptr)), trimDead(padDead(infoPtr)))
@@ -45,14 +77,14 @@ func TestGCInfo(t *testing.T) {
 
 func verifyGCInfo(t *testing.T, name string, p interface{}, mask0 []byte) {
 	mask := runtime.GCMask(p)
-	if bytes.Compare(mask, mask0) != 0 {
+	if !bytes.Equal(mask, mask0) {
 		t.Errorf("bad GC program for %v:\nwant %+v\ngot  %+v", name, mask0, mask)
 		return
 	}
 }
 
 func padDead(mask []byte) []byte {
-	// Because the dead bit isn't encoded until the third word,
+	// Because the dead bit isn't encoded in the second word,
 	// and because on 32-bit systems a one-word allocation
 	// uses a two-word block, the pointer info for a one-word
 	// object needs to be expanded to include an extra scalar
@@ -66,6 +98,9 @@ func padDead(mask []byte) []byte {
 func trimDead(mask []byte) []byte {
 	for len(mask) > 2 && mask[len(mask)-1] == typeScalar {
 		mask = mask[:len(mask)-1]
+	}
+	if len(mask) == 2 && mask[0] == typeScalar && mask[1] == typeScalar {
+		mask = mask[:0]
 	}
 	return mask
 }
@@ -122,7 +157,7 @@ type BigStruct struct {
 
 func infoBigStruct() []byte {
 	switch runtime.GOARCH {
-	case "386", "arm":
+	case "386", "arm", "mips", "mipsle":
 		return []byte{
 			typePointer,                                                // q *int
 			typeScalar, typeScalar, typeScalar, typeScalar, typeScalar, // w byte; e [17]byte
@@ -130,7 +165,7 @@ func infoBigStruct() []byte {
 			typeScalar, typeScalar, typeScalar, typeScalar, // t int; y uint16; u uint64
 			typePointer, typeScalar, // i string
 		}
-	case "arm64", "amd64", "mips64", "mips64le", "ppc64", "ppc64le":
+	case "arm64", "amd64", "mips64", "mips64le", "ppc64", "ppc64le", "s390x", "wasm":
 		return []byte{
 			typePointer,                        // q *int
 			typeScalar, typeScalar, typeScalar, // w byte; e [17]byte
@@ -183,6 +218,6 @@ var (
 
 	infoString = []byte{typePointer, typeScalar}
 	infoSlice  = []byte{typePointer, typeScalar, typeScalar}
-	infoEface  = []byte{typePointer, typePointer}
-	infoIface  = []byte{typePointer, typePointer}
+	infoEface  = []byte{typeScalar, typePointer}
+	infoIface  = []byte{typeScalar, typePointer}
 )

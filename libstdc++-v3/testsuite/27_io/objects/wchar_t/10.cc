@@ -1,8 +1,9 @@
 // { dg-require-namedlocale "se_NO.UTF-8" }
+// { dg-require-fileio "" }
 
 // 2003-05-01  Petur Runolfsson  <peturr02@ru.is>
 
-// Copyright (C) 2003-2016 Free Software Foundation, Inc.
+// Copyright (C) 2003-2019 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -28,8 +29,7 @@
 void test10()
 {
   using namespace std;
-  
-  bool test __attribute__((unused)) = true;
+
   const char* name = "tmp_10";
 
   locale loc(locale("se_NO.UTF-8"));

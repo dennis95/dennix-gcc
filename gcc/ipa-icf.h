@@ -1,5 +1,5 @@
 /* Interprocedural semantic function equality pass
-   Copyright (C) 2014-2016 Free Software Foundation, Inc.
+   Copyright (C) 2014-2019 Free Software Foundation, Inc.
 
    Contributed by Jan Hubicka <hubicka@ucw.cz> and Martin Liska <mliska@suse.cz>
 
@@ -141,6 +141,8 @@ public:
   unsigned int index;
 };
 
+typedef std::pair<symtab_node *, symtab_node *> symtab_pair;
+
 /* Semantic item is a base class that encapsulates all shared functionality
    for both semantic function and variable items.  */
 class sem_item
@@ -151,10 +153,8 @@ public:
   sem_item (sem_item_type _type, bitmap_obstack *stack);
 
   /* Semantic item constructor for a node of _TYPE, where STACK is used
-     for bitmap memory allocation. The item is based on symtab node _NODE
-     with computed _HASH.  */
-  sem_item (sem_item_type _type, symtab_node *_node, hashval_t _hash,
-	    bitmap_obstack *stack);
+     for bitmap memory allocation.  The item is based on symtab node _NODE.  */
+  sem_item (sem_item_type _type, symtab_node *_node, bitmap_obstack *stack);
 
   virtual ~sem_item ();
 
@@ -255,9 +255,6 @@ protected:
 					            symtab_node *n2,
 					            bool address);
 
-  /* Compare two attribute lists.  */
-  static bool compare_attributes (const_tree list1, const_tree list2);
-
   /* Hash properties compared by compare_referenced_symbol_properties.  */
   void hash_referenced_symbol_properties (symtab_node *ref,
 					  inchash::hash &hstate,
@@ -274,10 +271,16 @@ protected:
   /* Hash of item.  */
   hashval_t m_hash;
 
+  /* Indicated whether a hash value has been set or not.  */
+  bool m_hash_set;
+
 private:
   /* Initialize internal data structures. Bitmap STACK is used for
      bitmap memory allocation process.  */
   void setup (bitmap_obstack *stack);
+
+  /* Because types can be arbitrarily large, avoid quadratic bottleneck.  */
+  static hash_map<const_tree, hashval_t> m_type_hash_cache;
 }; // class sem_item
 
 class sem_function: public sem_item
@@ -286,9 +289,9 @@ public:
   /* Semantic function constructor that uses STACK as bitmap memory stack.  */
   sem_function (bitmap_obstack *stack);
 
-  /*  Constructor based on callgraph node _NODE with computed hash _HASH.
+  /*  Constructor based on callgraph node _NODE.
       Bitmap STACK is used for memory allocation.  */
-  sem_function (cgraph_node *_node, hashval_t _hash, bitmap_obstack *stack);
+  sem_function (cgraph_node *_node, bitmap_obstack *stack);
 
   ~sem_function ();
 
@@ -394,10 +397,10 @@ public:
   /* Semantic variable constructor that uses STACK as bitmap memory stack.  */
   sem_variable (bitmap_obstack *stack);
 
-  /*  Constructor based on callgraph node _NODE with computed hash _HASH.
+  /*  Constructor based on callgraph node _NODE.
       Bitmap STACK is used for memory allocation.  */
 
-  sem_variable (varpool_node *_node, hashval_t _hash, bitmap_obstack *stack);
+  sem_variable (varpool_node *_node, bitmap_obstack *stack);
 
   inline virtual void init_wpa (void) {}
 
@@ -441,7 +444,7 @@ struct congruence_class_group
 };
 
 /* Congruence class set structure.  */
-struct congruence_class_group_hash : nofree_ptr_hash <congruence_class_group>
+struct congruence_class_hash : nofree_ptr_hash <congruence_class_group>
 {
   static inline hashval_t hash (const congruence_class_group *item)
   {
@@ -521,9 +524,6 @@ public:
   /* Gets a congruence class group based on given HASH value and TYPE.  */
   congruence_class_group *get_group_by_hash (hashval_t hash,
       sem_item_type type);
-
-  /* Because types can be arbitrarily large, avoid quadratic bottleneck.  */
-  hash_map<const_tree, hashval_t> m_type_hash_cache;
 private:
 
   /* For each semantic item, append hash values of references.  */
@@ -562,6 +562,12 @@ private:
      processed.  */
   bool merge_classes (unsigned int prev_class_count);
 
+  /* Fixup points to analysis info.  */
+  void fixup_points_to_sets (void);
+
+  /* Fixup points to set PT.  */
+  void fixup_pt_set (struct pt_solution *pt);
+
   /* Adds a newly created congruence class CLS to worklist.  */
   void worklist_push (congruence_class *cls);
 
@@ -593,6 +599,9 @@ private:
 					 bitmap const &b,
 					 traverse_split_pair *pair);
 
+  /* Compare function for sorting pairs in do_congruence_step_f.  */
+  static int sort_congruence_split (const void *, const void *);
+
   /* Reads a section from LTO stream file FILE_DATA. Input block for DATA
      contains LEN bytes.  */
   void read_section (lto_file_decl_data *file_data, const char *data,
@@ -608,8 +617,8 @@ private:
   /* A set containing all items removed by hooks.  */
   hash_set <symtab_node *> m_removed_items_set;
 
-  /* Hashtable of congruence classes */
-  hash_table <congruence_class_group_hash> m_classes;
+  /* Hashtable of congruence classes.  */
+  hash_table <congruence_class_hash> m_classes;
 
   /* Count of congruence classes.  */
   unsigned int m_classes_count;
@@ -631,6 +640,10 @@ private:
 
   /* Bitmap stack.  */
   bitmap_obstack m_bmstack;
+
+  /* Vector of merged variables.  Needed for fixup of points-to-analysis
+     info.  */
+  vec <symtab_pair> m_merged_variables;
 }; // class sem_item_optimizer
 
 } // ipa_icf namespace

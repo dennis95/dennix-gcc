@@ -1,5 +1,5 @@
 ;;  Machine Description for Renesas RL78 processors
-;;  Copyright (C) 2011-2016 Free Software Foundation, Inc.
+;;  Copyright (C) 2011-2019 Free Software Foundation, Inc.
 ;;  Contributed by Red Hat.
 
 ;; This file is part of GCC.
@@ -105,6 +105,14 @@
   [(set_attr "valloc" "op1")]
 )
 
+(define_expand "bswaphi2"
+  [(set (match_operand:HI           0 "nonimmediate_operand")
+        (bswap:HI (match_operand:HI 1 "general_operand")))]
+  ""
+  "if (rl78_force_nonfar_2 (operands, gen_bswaphi2))
+     DONE;"
+)
+
 ;;---------- Conversions ------------------------
 
 (define_expand "zero_extendqihi2"
@@ -159,7 +167,7 @@
   [(set (match_operand:HI 0 "register_operand")
         (mult:HI (zero_extend:HI (match_operand:QI 1 "register_operand"))
                  (zero_extend:HI (match_operand:QI 2 "register_operand"))))]
-  "!TARGET_G10"
+  ""
   ""
 )
 

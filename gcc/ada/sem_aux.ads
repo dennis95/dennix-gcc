@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2015, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2019, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -38,7 +38,7 @@
 --  content of entities in the tree, so this package is used for routines that
 --  require more than minimal semantic knowledge.
 
-with Alloc; use Alloc;
+with Alloc;
 with Namet; use Namet;
 with Table;
 with Types; use Types;
@@ -161,8 +161,12 @@ package Sem_Aux is
    --  referencing this entity. It is an error to call this function if Ekind
    --  (Op) /= E_Operator.
 
+   function Get_Called_Entity (Call : Node_Id) return Entity_Id;
+   --  Obtain the entity of the entry, operator, or subprogram being invoked
+   --  by call Call.
+
    function Get_Low_Bound (E : Entity_Id) return Node_Id;
-   --  For an index subtype or string literal subtype, return its low bound
+   --  For an index subtype or string literal subtype, returns its low bound
 
    function Get_Unary_Nkind (Op : Entity_Id) return Node_Kind;
    --  Op must be an entity with an Ekind of E_Operator. This function returns
@@ -245,6 +249,10 @@ package Sem_Aux is
    --  only checks for a rep item that has been directly specified for E (and
    --  not inherited from its parents, if any). If found then True is returned,
    --  otherwise False indicates that no matching entry was found.
+
+   function Has_Rep_Item (E : Entity_Id; N : Node_Id) return Boolean;
+   --  Determine whether the Rep_Item chain of arbitrary entity E contains item
+   --  N. N must denote a valid rep item.
 
    function Has_Rep_Pragma
      (E             : Entity_Id;

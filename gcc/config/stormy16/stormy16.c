@@ -1,5 +1,5 @@
 /* Xstormy16 target functions.
-   Copyright (C) 1997-2016 Free Software Foundation, Inc.
+   Copyright (C) 1997-2019 Free Software Foundation, Inc.
    Contributed by Red Hat, Inc.
 
    This file is part of GCC.
@@ -18,6 +18,8 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -25,8 +27,11 @@
 #include "target.h"
 #include "rtl.h"
 #include "tree.h"
+#include "stringpool.h"
+#include "attribs.h"
 #include "gimple.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "stringpool.h"
 #include "optabs.h"
@@ -1617,7 +1622,7 @@ static void
 xstormy16_asm_out_destructor (rtx symbol, int priority)
 {
   const char *section = ".dtors";
-  char buf[16];
+  char buf[18];
 
   /* ??? This only works reliably with the GNU linker.  */
   if (priority != DEFAULT_INIT_PRIORITY)
@@ -1639,7 +1644,7 @@ static void
 xstormy16_asm_out_constructor (rtx symbol, int priority)
 {
   const char *section = ".ctors";
-  char buf[16];
+  char buf[18];
 
   /* ??? This only works reliably with the GNU linker.  */
   if (priority != DEFAULT_INIT_PRIORITY)
@@ -2186,15 +2191,15 @@ static tree xstormy16_handle_below100_attribute
 
 static const struct attribute_spec xstormy16_attribute_table[] =
 {
-  /* name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-     affects_type_identity.  */
-  { "interrupt", 0, 0, false, true,  true,
-    xstormy16_handle_interrupt_attribute , false },
-  { "BELOW100",  0, 0, false, false, false,
-    xstormy16_handle_below100_attribute, false },
-  { "below100",  0, 0, false, false, false,
-    xstormy16_handle_below100_attribute, false },
-  { NULL,        0, 0, false, false, false, NULL, false }
+  /* name, min_len, max_len, decl_req, type_req, fn_type_req,
+     affects_type_identity, handler, exclude.  */
+  { "interrupt", 0, 0, false, true,  true, false,
+    xstormy16_handle_interrupt_attribute, NULL },
+  { "BELOW100",  0, 0, false, false, false, false,
+    xstormy16_handle_below100_attribute, NULL },
+  { "below100",  0, 0, false, false, false, false,
+    xstormy16_handle_below100_attribute, NULL },
+  { NULL,        0, 0, false, false, false, false, NULL, NULL }
 };
 
 /* Handle an "interrupt" attribute;
@@ -2614,6 +2619,30 @@ xstormy16_return_in_memory (const_tree type, const_tree fntype ATTRIBUTE_UNUSED)
   const HOST_WIDE_INT size = int_size_in_bytes (type);
   return (size == -1 || size > UNITS_PER_WORD * NUM_ARGUMENT_REGISTERS);
 }
+
+/* Implement TARGET_HARD_REGNO_MODE_OK.  */
+
+static bool
+xstormy16_hard_regno_mode_ok (unsigned int regno, machine_mode mode)
+{
+  return regno != 16 || mode == BImode;
+}
+
+/* Implement TARGET_MODES_TIEABLE_P.  */
+
+static bool
+xstormy16_modes_tieable_p (machine_mode mode1, machine_mode mode2)
+{
+  return mode1 != BImode && mode2 != BImode;
+}
+
+/* Implement PUSH_ROUNDING.  */
+
+poly_int64
+xstormy16_push_rounding (poly_int64 bytes)
+{
+  return (bytes + 1) & ~1;
+}
 
 #undef  TARGET_ASM_ALIGNED_HI_OP
 #define TARGET_ASM_ALIGNED_HI_OP "\t.hword\t"
@@ -2677,6 +2706,9 @@ xstormy16_return_in_memory (const_tree type, const_tree fntype ATTRIBUTE_UNUSED)
 #undef  TARGET_PREFERRED_OUTPUT_RELOAD_CLASS
 #define TARGET_PREFERRED_OUTPUT_RELOAD_CLASS xstormy16_preferred_reload_class
 
+#undef TARGET_LRA_P
+#define TARGET_LRA_P hook_bool_void_false
+
 #undef TARGET_LEGITIMATE_ADDRESS_P
 #define TARGET_LEGITIMATE_ADDRESS_P	xstormy16_legitimate_address_p
 #undef TARGET_MODE_DEPENDENT_ADDRESS_P
@@ -2687,6 +2719,17 @@ xstormy16_return_in_memory (const_tree type, const_tree fntype ATTRIBUTE_UNUSED)
 
 #undef TARGET_TRAMPOLINE_INIT
 #define TARGET_TRAMPOLINE_INIT xstormy16_trampoline_init
+
+#undef TARGET_HARD_REGNO_MODE_OK
+#define TARGET_HARD_REGNO_MODE_OK xstormy16_hard_regno_mode_ok
+#undef TARGET_MODES_TIEABLE_P
+#define TARGET_MODES_TIEABLE_P xstormy16_modes_tieable_p
+
+#undef TARGET_CONSTANT_ALIGNMENT
+#define TARGET_CONSTANT_ALIGNMENT constant_alignment_word_strings
+
+#undef  TARGET_HAVE_SPECULATION_SAFE_VALUE
+#define TARGET_HAVE_SPECULATION_SAFE_VALUE speculation_safe_value_not_needed
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

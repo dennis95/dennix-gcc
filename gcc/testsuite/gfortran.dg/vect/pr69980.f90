@@ -1,11 +1,10 @@
-! { dg-do run }
 ! { dg-additional-options "-Ofast -fno-inline" }
 
 subroutine check (a, b)
    real *8, intent(in) :: a(4), b(4)
 
    IF (abs(a(1)-b(1)) > 1) THEN
-      CALL ABORT
+      STOP 1
    END IF
 end subroutine check
 

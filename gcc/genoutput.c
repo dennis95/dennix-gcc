@@ -1,5 +1,5 @@
 /* Generate code from to output assembler insns as recognized from rtl.
-   Copyright (C) 1987-2016 Free Software Foundation, Inc.
+   Copyright (C) 1987-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -127,7 +127,7 @@ struct operand_data
 
 static struct operand_data null_operand =
 {
-  0, 0, "", "", VOIDmode, 0, 0, 0, 0, 0
+  0, 0, "", "", E_VOIDmode, 0, 0, 0, 0, 0
 };
 
 static struct operand_data *odata = &null_operand;
@@ -203,6 +203,7 @@ output_prologue (void)
   printf ("/* Generated automatically by the program `genoutput'\n\
    from the machine description file `md'.  */\n\n");
 
+  printf ("#define IN_TARGET_CODE 1\n");
   printf ("#include \"config.h\"\n");
   printf ("#include \"system.h\"\n");
   printf ("#include \"coretypes.h\"\n");
@@ -219,6 +220,7 @@ output_prologue (void)
   printf ("#include \"expmed.h\"\n");
   printf ("#include \"dojump.h\"\n");
   printf ("#include \"explow.h\"\n");
+  printf ("#include \"memmodel.h\"\n");
   printf ("#include \"emit-rtl.h\"\n");
   printf ("#include \"stmt.h\"\n");
   printf ("#include \"expr.h\"\n");
@@ -252,7 +254,7 @@ output_operand_data (void)
 
       printf ("    \"%s\",\n", d->constraint ? d->constraint : "");
 
-      printf ("    %smode,\n", GET_MODE_NAME (d->mode));
+      printf ("    E_%smode,\n", GET_MODE_NAME (d->mode));
 
       printf ("    %d,\n", d->strict_low);
 
@@ -630,7 +632,7 @@ process_template (struct data *d, const char *template_code)
       printf ("output_%d (rtx *operands ATTRIBUTE_UNUSED, rtx_insn *insn ATTRIBUTE_UNUSED)\n",
 	      d->code_number);
       puts ("{");
-      print_md_ptr_loc (template_code);
+      rtx_reader_ptr->print_md_ptr_loc (template_code);
       puts (template_code + 1);
       puts ("}");
     }
@@ -979,14 +981,14 @@ init_insn_for_nothing (void)
   idata = XCNEW (struct data);
   new (idata) data ();
   idata->name = "*placeholder_for_nothing";
-  idata->loc = file_location ("<internal>", 0);
+  idata->loc = file_location ("<internal>", 0, 0);
   idata_end = &idata->next;
 }
 
-extern int main (int, char **);
+extern int main (int, const char **);
 
 int
-main (int argc, char **argv)
+main (int argc, const char **argv)
 {
   progname = "genoutput";
 

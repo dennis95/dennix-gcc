@@ -48,10 +48,28 @@ func BenchmarkSignP256(b *testing.B) {
 	hashed := []byte("testing")
 	priv, _ := GenerateKey(p256, rand.Reader)
 
+	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _, _ = Sign(rand.Reader, priv, hashed)
-	}
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _, _ = Sign(rand.Reader, priv, hashed)
+		}
+	})
+}
+
+func BenchmarkSignP384(b *testing.B) {
+	b.ResetTimer()
+	p384 := elliptic.P384()
+	hashed := []byte("testing")
+	priv, _ := GenerateKey(p384, rand.Reader)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _, _ = Sign(rand.Reader, priv, hashed)
+		}
+	})
 }
 
 func BenchmarkVerifyP256(b *testing.B) {
@@ -61,20 +79,26 @@ func BenchmarkVerifyP256(b *testing.B) {
 	priv, _ := GenerateKey(p256, rand.Reader)
 	r, s, _ := Sign(rand.Reader, priv, hashed)
 
+	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		Verify(&priv.PublicKey, hashed, r, s)
-	}
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			Verify(&priv.PublicKey, hashed, r, s)
+		}
+	})
 }
 
 func BenchmarkKeyGeneration(b *testing.B) {
 	b.ResetTimer()
 	p256 := elliptic.P256()
 
+	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		GenerateKey(p256, rand.Reader)
-	}
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			GenerateKey(p256, rand.Reader)
+		}
+	})
 }
 
 func testSignAndVerify(t *testing.T, c elliptic.Curve, tag string) {
@@ -130,7 +154,7 @@ func testNonceSafety(t *testing.T, c elliptic.Curve, tag string) {
 	}
 
 	if r0.Cmp(r1) == 0 {
-		t.Errorf("%s: the nonce used for two diferent messages was the same", tag)
+		t.Errorf("%s: the nonce used for two different messages was the same", tag)
 	}
 }
 
@@ -189,7 +213,7 @@ func fromHex(s string) *big.Int {
 
 func TestVectors(t *testing.T) {
 	// This test runs the full set of NIST test vectors from
-	// http://csrc.nist.gov/groups/STM/cavp/documents/dss/186-3ecdsatestvectors.zip
+	// https://csrc.nist.gov/groups/STM/cavp/documents/dss/186-3ecdsatestvectors.zip
 	//
 	// The SigVer.rsp file has been edited to remove test vectors for
 	// unsupported algorithms and has been compressed.
@@ -293,6 +317,51 @@ func TestVectors(t *testing.T) {
 			}
 		default:
 			t.Fatalf("unknown variable on line %d: %s", lineNo, line)
+		}
+	}
+}
+
+func testNegativeInputs(t *testing.T, curve elliptic.Curve, tag string) {
+	key, err := GenerateKey(curve, rand.Reader)
+	if err != nil {
+		t.Errorf("failed to generate key for %q", tag)
+	}
+
+	var hash [32]byte
+	r := new(big.Int).SetInt64(1)
+	r.Lsh(r, 550 /* larger than any supported curve */)
+	r.Neg(r)
+
+	if Verify(&key.PublicKey, hash[:], r, r) {
+		t.Errorf("bogus signature accepted for %q", tag)
+	}
+}
+
+func TestNegativeInputs(t *testing.T) {
+	testNegativeInputs(t, elliptic.P224(), "p224")
+	testNegativeInputs(t, elliptic.P256(), "p256")
+	testNegativeInputs(t, elliptic.P384(), "p384")
+	testNegativeInputs(t, elliptic.P521(), "p521")
+}
+
+func TestZeroHashSignature(t *testing.T) {
+	zeroHash := make([]byte, 64)
+
+	for _, curve := range []elliptic.Curve{elliptic.P224(), elliptic.P256(), elliptic.P384(), elliptic.P521()} {
+		privKey, err := GenerateKey(curve, rand.Reader)
+		if err != nil {
+			panic(err)
+		}
+
+		// Sign a hash consisting of all zeros.
+		r, s, err := Sign(rand.Reader, privKey, zeroHash)
+		if err != nil {
+			panic(err)
+		}
+
+		// Confirm that it can be verified.
+		if !Verify(&privKey.PublicKey, zeroHash, r, s) {
+			t.Errorf("zero hash signature verify failed for %T", curve)
 		}
 	}
 }

@@ -8,6 +8,8 @@
 // Ioctl handling in common sanitizer interceptors.
 //===----------------------------------------------------------------------===//
 
+#if !SANITIZER_NETBSD
+
 #include "sanitizer_flags.h"
 
 struct ioctl_desc {
@@ -51,27 +53,13 @@ static void ioctl_table_fill() {
   _(FIONBIO, READ, sizeof(int));
   _(FIONCLEX, NONE, 0);
   _(FIOSETOWN, READ, sizeof(int));
-  _(SIOCADDMULTI, READ, struct_ifreq_sz);
   _(SIOCATMARK, WRITE, sizeof(int));
-  _(SIOCDELMULTI, READ, struct_ifreq_sz);
-  _(SIOCGIFADDR, WRITE, struct_ifreq_sz);
-  _(SIOCGIFBRDADDR, WRITE, struct_ifreq_sz);
   _(SIOCGIFCONF, CUSTOM, 0);
-  _(SIOCGIFDSTADDR, WRITE, struct_ifreq_sz);
-  _(SIOCGIFFLAGS, WRITE, struct_ifreq_sz);
-  _(SIOCGIFMETRIC, WRITE, struct_ifreq_sz);
-  _(SIOCGIFMTU, WRITE, struct_ifreq_sz);
-  _(SIOCGIFNETMASK, WRITE, struct_ifreq_sz);
   _(SIOCGPGRP, WRITE, sizeof(int));
-  _(SIOCSIFADDR, READ, struct_ifreq_sz);
-  _(SIOCSIFBRDADDR, READ, struct_ifreq_sz);
-  _(SIOCSIFDSTADDR, READ, struct_ifreq_sz);
-  _(SIOCSIFFLAGS, READ, struct_ifreq_sz);
-  _(SIOCSIFMETRIC, READ, struct_ifreq_sz);
-  _(SIOCSIFMTU, READ, struct_ifreq_sz);
-  _(SIOCSIFNETMASK, READ, struct_ifreq_sz);
   _(SIOCSPGRP, READ, sizeof(int));
+#if !SANITIZER_SOLARIS
   _(TIOCCONS, NONE, 0);
+#endif
   _(TIOCEXCL, NONE, 0);
   _(TIOCGETD, WRITE, sizeof(int));
   _(TIOCGPGRP, WRITE, pid_t_sz);
@@ -89,6 +77,25 @@ static void ioctl_table_fill() {
   _(TIOCSPGRP, READ, pid_t_sz);
   _(TIOCSTI, READ, sizeof(char));
   _(TIOCSWINSZ, READ, struct_winsize_sz);
+
+#if !SANITIZER_IOS
+  _(SIOCADDMULTI, READ, struct_ifreq_sz);
+  _(SIOCDELMULTI, READ, struct_ifreq_sz);
+  _(SIOCGIFADDR, WRITE, struct_ifreq_sz);
+  _(SIOCGIFBRDADDR, WRITE, struct_ifreq_sz);
+  _(SIOCGIFDSTADDR, WRITE, struct_ifreq_sz);
+  _(SIOCGIFFLAGS, WRITE, struct_ifreq_sz);
+  _(SIOCGIFMETRIC, WRITE, struct_ifreq_sz);
+  _(SIOCGIFMTU, WRITE, struct_ifreq_sz);
+  _(SIOCGIFNETMASK, WRITE, struct_ifreq_sz);
+  _(SIOCSIFADDR, READ, struct_ifreq_sz);
+  _(SIOCSIFBRDADDR, READ, struct_ifreq_sz);
+  _(SIOCSIFDSTADDR, READ, struct_ifreq_sz);
+  _(SIOCSIFFLAGS, READ, struct_ifreq_sz);
+  _(SIOCSIFMETRIC, READ, struct_ifreq_sz);
+  _(SIOCSIFMTU, READ, struct_ifreq_sz);
+  _(SIOCSIFNETMASK, READ, struct_ifreq_sz);
+#endif
 
 #if (SANITIZER_LINUX && !SANITIZER_ANDROID)
   _(SIOCGETSGCNT, WRITE, struct_sioc_sg_req_sz);
@@ -471,7 +478,7 @@ struct ioctl_desc_compare {
 
 static void ioctl_init() {
   ioctl_table_fill();
-  InternalSort(&ioctl_table, ioctl_table_size, ioctl_desc_compare());
+  Sort(ioctl_table, ioctl_table_size, ioctl_desc_compare());
 
   bool bad = false;
   for (unsigned i = 0; i < ioctl_table_size - 1; ++i) {
@@ -578,7 +585,8 @@ static void ioctl_common_pre(void *ctx, const ioctl_desc *desc, int d,
     return;
   if (request == IOCTL_SIOCGIFCONF) {
     struct __sanitizer_ifconf *ifc = (__sanitizer_ifconf *)arg;
-    COMMON_INTERCEPTOR_READ_RANGE(ctx, &ifc->ifc_len, sizeof(ifc->ifc_len));
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, (char*)&ifc->ifc_len,
+                                  sizeof(ifc->ifc_len));
   }
 }
 
@@ -596,3 +604,5 @@ static void ioctl_common_post(void *ctx, const ioctl_desc *desc, int res, int d,
     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ifc->ifc_ifcu.ifcu_req, ifc->ifc_len);
   }
 }
+
+#endif

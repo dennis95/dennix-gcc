@@ -1,6 +1,7 @@
 /* PR target/69071 */
 /* { dg-do compile } */
 /* { dg-options "-O2 -g" } */
+/* { dg-require-effective-target size20plus } */
 
 void *bar (void *);
 

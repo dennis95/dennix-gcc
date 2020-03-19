@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1996-2015, Free Software Foundation, Inc.         --
+--          Copyright (C) 1996-2019, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -65,7 +65,7 @@ package Exp_Dbug is
 
    --  For global entities, the encoded name includes all components of the
    --  fully expanded name (but omitting Standard at the start). For example,
-   --  if a library level child package P.Q has an embedded package R, and
+   --  if a library-level child package P.Q has an embedded package R, and
    --  there is an entity in this embedded package whose name is S, the encoded
    --  name will include the components p.q.r.s.
 
@@ -75,6 +75,12 @@ package Exp_Dbug is
    --  local variables of procedures, so it is not necessary to have full
    --  qualification for such entities. In particular this means that direct
    --  local variables of a procedure are not qualified.
+
+   --  For Ghost entities, the encoding adds a prefix "___ghost_" to aid the
+   --  detection of leaks of Ignored Ghost entities in the "living" space.
+   --  Ignored Ghost entities and any code associated with them should be
+   --  removed by the compiler in a post-processing pass. As a result,
+   --  object files should not contain any occurrences of this prefix.
 
    --  As an example of the local name convention, consider a procedure V.W
    --  with a local variable X, and a nested block Y containing an entity Z.
@@ -285,7 +291,7 @@ package Exp_Dbug is
       --    #6.  x__y__m3          (no BNPE's in signt)
       --    #7.  x__y__j           (no BNPE's in sight)
       --    #8.  k__z              (no BNPE's, only up to procedure)
-      --    #9   _ada_x__m3        (library level subprogram)
+      --    #9   _ada_x__m3        (library-level subprogram)
 
       --  Note that we have instances here of both kind of potential name
       --  clashes, and the above examples show how the encodings avoid the
@@ -435,6 +441,21 @@ package Exp_Dbug is
    --  generating code, since the necessary information for computing the
    --  proper external name is not available in this case.
 
+   -------------------------------------
+   -- Encoding for translation into C --
+   -------------------------------------
+
+   --  In Modify_Tree_For_C mode we must add encodings to dismabiguate cases
+   --  where Ada block structure cannot be directly translated. These cases
+   --  are as follows:
+
+   --    a)  A loop variable may hide a homonym in an enclosing block
+   --    b)  A block-local variable may hide a homonym in an enclosing block
+
+   --  In C these constructs are not scopes and we must distinguish the names
+   --  explicitly. In the first case we create a qualified name with the suffix
+   --  'L', in the second case with a suffix 'B'.
+
    --------------------------------------------
    -- Subprograms for Handling Qualification --
    --------------------------------------------
@@ -458,7 +479,7 @@ package Exp_Dbug is
    --  the changes till just before gigi is called, we avoid any concerns
    --  about such effects. Gigi itself does not use the names except for
    --  output of names for debugging purposes (which is why we are doing
-   --  the name changes in the first place.
+   --  the name changes in the first place).
 
    --  Note: the routines Get_Unqualified_[Decoded]_Name_String in Namet are
    --  useful to remove qualification from a name qualified by the call to

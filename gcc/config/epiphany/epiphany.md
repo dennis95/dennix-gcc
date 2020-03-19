@@ -1,5 +1,5 @@
 ;; Machine description of the Adaptiva epiphany cpu for GNU C compiler
-;; Copyright (C) 1994-2016 Free Software Foundation, Inc.
+;; Copyright (C) 1994-2019 Free Software Foundation, Inc.
 ;; Contributed by Embecosm on behalf of Adapteva, Inc.
 
 ;; This file is part of GCC.
@@ -1039,7 +1039,7 @@
 ; use next_active_insn to look at the 'following' insn.  That should
 ; exist, because peephole2 runs after reload, and there has to be
 ; a return after an fp_int insn.
-; ??? However, we can not even ordinarily match the preceding insn;
+; ??? However, we cannot even ordinarily match the preceding insn;
 ; there is some bug in the generators such that then it leaves out
 ; the check for PARALLEL before the length check for the then-second
 ; main insn.  Observed when compiling compatibility-atomic-c++0x.cc
@@ -1438,7 +1438,7 @@
   [(set_attr "type" "flow")])
 
 ; Floating point instructions require manipulating the control register.
-; Manipulating the control register needs aritmetic.
+; Manipulating the control register needs arithmetic.
 ; Arithmetic clobbers flags.
 ; The flags are in the status register, which also contains the alternate
 ; flag and the interrupt enable/disable bits.

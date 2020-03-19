@@ -1,6 +1,6 @@
 /* An SH specific RTL pass that tries to combine comparisons and redundant
    condition code register stores across multiple basic blocks.
-   Copyright (C) 2013-2016 Free Software Foundation, Inc.
+   Copyright (C) 2013-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -18,6 +18,8 @@ You should have received a copy of the GNU General Public License
 along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #define INCLUDE_ALGORITHM
 #define INCLUDE_LIST
@@ -28,6 +30,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "target.h"
 #include "rtl.h"
 #include "tree.h"
+#include "memmodel.h"
 #include "optabs.h"
 #include "emit-rtl.h"
 #include "recog.h"
@@ -290,7 +293,7 @@ find_set_of_reg_bb (rtx reg, rtx_insn *insn)
     return result;
 
   for (result.insn = insn; result.insn != NULL;
-       result.insn = prev_nonnote_insn_bb (result.insn))
+       result.insn = prev_nonnote_nondebug_insn_bb (result.insn))
     {
       if (BARRIER_P (result.insn))
 	return result;
@@ -747,9 +750,8 @@ sh_treg_combine::record_set_of_reg (rtx reg, rtx_insn *start_insn,
       // Now see how the ccreg was set.
       // For now it must be in the same BB.
       log_msg ("tracing ccreg\n");
-      new_entry.setcc =
-	  find_set_of_reg_bb (m_ccreg,
-			      prev_nonnote_insn_bb (new_entry.cstore.insn));
+      new_entry.setcc = find_set_of_reg_bb
+	(m_ccreg, prev_nonnote_nondebug_insn_bb (new_entry.cstore.insn));
 
       // If cstore was found but setcc was not found continue anyway, as
       // for some of the optimization types the setcc is irrelevant.
@@ -1352,7 +1354,8 @@ sh_treg_combine::try_optimize_cbranch (rtx_insn *insn)
   //   (set (reg ccreg) (eq (reg) (const_int 0)))
   // The testing insn could also be outside of the current basic block, but
   // for now we limit the search to the current basic block.
-  trace.setcc = find_set_of_reg_bb (m_ccreg, prev_nonnote_insn_bb (insn));
+  trace.setcc = find_set_of_reg_bb
+    (m_ccreg, prev_nonnote_nondebug_insn_bb (insn));
 
   if (trace.setcc.set_src () == NULL_RTX)
     log_return_void ("could not find set of ccreg in current BB\n");
@@ -1411,9 +1414,9 @@ sh_treg_combine::try_optimize_cbranch (rtx_insn *insn)
   // If we find it here there's no point in checking other BBs.
   trace.bb_entries.push_front (bb_entry (trace.bb ()));
 
-  record_return_t res =
-      record_set_of_reg (trace_reg, prev_nonnote_insn_bb (trace.setcc.insn),
-			 trace.bb_entries.front ());
+  record_return_t res = record_set_of_reg
+    (trace_reg, prev_nonnote_nondebug_insn_bb (trace.setcc.insn),
+     trace.bb_entries.front ());
 
   if (res == other_set_found)
     log_return_void ("other set found - aborting trace\n");

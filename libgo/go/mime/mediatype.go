@@ -5,7 +5,6 @@
 package mime
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"sort"
@@ -19,7 +18,7 @@ import (
 // When any of the arguments result in a standard violation then
 // FormatMediaType returns the empty string.
 func FormatMediaType(t string, param map[string]string) string {
-	var b bytes.Buffer
+	var b strings.Builder
 	if slash := strings.Index(t, "/"); slash == -1 {
 		if !isToken(t) {
 			return ""
@@ -57,7 +56,8 @@ func FormatMediaType(t string, param map[string]string) string {
 
 		b.WriteByte('"')
 		offset := 0
-		for index, character := range value {
+		for index := 0; index < len(value); index++ {
+			character := value[index]
 			if character == '"' || character == '\\' {
 				b.WriteString(value[offset:index])
 				offset = index
@@ -94,11 +94,19 @@ func checkMediaTypeDisposition(s string) error {
 	return nil
 }
 
+// ErrInvalidMediaParameter is returned by ParseMediaType if
+// the media type value was found but there was an error parsing
+// the optional parameters
+var ErrInvalidMediaParameter = errors.New("mime: invalid media parameter")
+
 // ParseMediaType parses a media type value and any optional
 // parameters, per RFC 1521.  Media types are the values in
 // Content-Type and Content-Disposition headers (RFC 2183).
 // On success, ParseMediaType returns the media type converted
 // to lowercase and trimmed of white space and a non-nil map.
+// If there is an error parsing the optional parameter,
+// the media type will be returned along with the error
+// ErrInvalidMediaParameter.
 // The returned map, params, maps from the lowercase
 // attribute to the attribute value with its case preserved.
 func ParseMediaType(v string) (mediatype string, params map[string]string, err error) {
@@ -134,7 +142,7 @@ func ParseMediaType(v string) (mediatype string, params map[string]string, err e
 				return
 			}
 			// Parse error.
-			return "", nil, errors.New("mime: invalid media parameter")
+			return mediatype, nil, ErrInvalidMediaParameter
 		}
 
 		pmap := params
@@ -159,12 +167,13 @@ func ParseMediaType(v string) (mediatype string, params map[string]string, err e
 
 	// Stitch together any continuations or things with stars
 	// (i.e. RFC 2231 things with stars: "foo*0" or "foo*")
-	var buf bytes.Buffer
+	var buf strings.Builder
 	for key, pieceMap := range continuation {
 		singlePartKey := key + "*"
 		if v, ok := pieceMap[singlePartKey]; ok {
-			decv := decode2231Enc(v)
-			params[key] = decv
+			if decv, ok := decode2231Enc(v); ok {
+				params[key] = decv
+			}
 			continue
 		}
 
@@ -178,16 +187,18 @@ func ParseMediaType(v string) (mediatype string, params map[string]string, err e
 				continue
 			}
 			encodedPart := simplePart + "*"
-			if v, ok := pieceMap[encodedPart]; ok {
-				valid = true
-				if n == 0 {
-					buf.WriteString(decode2231Enc(v))
-				} else {
-					decv, _ := percentHexUnescape(v)
+			v, ok := pieceMap[encodedPart]
+			if !ok {
+				break
+			}
+			valid = true
+			if n == 0 {
+				if decv, ok := decode2231Enc(v); ok {
 					buf.WriteString(decv)
 				}
 			} else {
-				break
+				decv, _ := percentHexUnescape(v)
+				buf.WriteString(decv)
 			}
 		}
 		if valid {
@@ -198,21 +209,27 @@ func ParseMediaType(v string) (mediatype string, params map[string]string, err e
 	return
 }
 
-func decode2231Enc(v string) string {
+func decode2231Enc(v string) (string, bool) {
 	sv := strings.SplitN(v, "'", 3)
 	if len(sv) != 3 {
-		return ""
+		return "", false
 	}
 	// TODO: ignoring lang in sv[1] for now. If anybody needs it we'll
 	// need to decide how to expose it in the API. But I'm not sure
 	// anybody uses it in practice.
 	charset := strings.ToLower(sv[0])
+	if len(charset) == 0 {
+		return "", false
+	}
 	if charset != "us-ascii" && charset != "utf-8" {
 		// TODO: unsupported encoding
-		return ""
+		return "", false
 	}
-	encv, _ := percentHexUnescape(sv[2])
-	return encv
+	encv, err := percentHexUnescape(sv[2])
+	if err != nil {
+		return "", false
+	}
+	return encv, true
 }
 
 func isNotTokenChar(r rune) bool {
@@ -221,7 +238,7 @@ func isNotTokenChar(r rune) bool {
 
 // consumeToken consumes a token from the beginning of provided
 // string, per RFC 2045 section 5.1 (referenced from 2183), and return
-// the token consumed and the rest of the string.  Returns ("", v) on
+// the token consumed and the rest of the string. Returns ("", v) on
 // failure to consume at least one character.
 func consumeToken(v string) (token, rest string) {
 	notPos := strings.IndexFunc(v, isNotTokenChar)
@@ -237,7 +254,7 @@ func consumeToken(v string) (token, rest string) {
 // consumeValue consumes a "value" per RFC 2045, where a value is
 // either a 'token' or a 'quoted-string'.  On success, consumeValue
 // returns the value consumed (and de-quoted/escaped, if a
-// quoted-string) and the rest of the string.  On failure, returns
+// quoted-string) and the rest of the string. On failure, returns
 // ("", v).
 func consumeValue(v string) (value, rest string) {
 	if v == "" {
@@ -248,24 +265,33 @@ func consumeValue(v string) (value, rest string) {
 	}
 
 	// parse a quoted-string
-	rest = v[1:] // consume the leading quote
-	buffer := new(bytes.Buffer)
-	var nextIsLiteral bool
-	for idx, r := range rest {
-		switch {
-		case nextIsLiteral:
-			buffer.WriteRune(r)
-			nextIsLiteral = false
-		case r == '"':
-			return buffer.String(), rest[idx+1:]
-		case r == '\\':
-			nextIsLiteral = true
-		case r != '\r' && r != '\n':
-			buffer.WriteRune(r)
-		default:
+	buffer := new(strings.Builder)
+	for i := 1; i < len(v); i++ {
+		r := v[i]
+		if r == '"' {
+			return buffer.String(), v[i+1:]
+		}
+		// When MSIE sends a full file path (in "intranet mode"), it does not
+		// escape backslashes: "C:\dev\go\foo.txt", not "C:\\dev\\go\\foo.txt".
+		//
+		// No known MIME generators emit unnecessary backslash escapes
+		// for simple token characters like numbers and letters.
+		//
+		// If we see an unnecessary backslash escape, assume it is from MSIE
+		// and intended as a literal backslash. This makes Go servers deal better
+		// with MSIE without affecting the way they handle conforming MIME
+		// generators.
+		if r == '\\' && i+1 < len(v) && isTSpecial(rune(v[i+1])) {
+			buffer.WriteByte(v[i+1])
+			i++
+			continue
+		}
+		if r == '\r' || r == '\n' {
 			return "", v
 		}
+		buffer.WriteByte(v[i])
 	}
+	// Did not find end quote.
 	return "", v
 }
 

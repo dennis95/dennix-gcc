@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -75,6 +75,14 @@ func CgoExecSignalMask() {
 					cmd.Stdout = os.Stdout
 					cmd.Stderr = os.Stderr
 					if err := cmd.Run(); err != nil {
+						// An overloaded system
+						// may fail with EAGAIN.
+						// This doesn't tell us
+						// anything useful; ignore it.
+						// Issue #27731.
+						if isEAGAIN(err) {
+							return
+						}
 						fmt.Printf("iteration %d: %v\n", j, err)
 						os.Exit(1)
 					}
@@ -86,4 +94,12 @@ func CgoExecSignalMask() {
 	wg.Wait()
 
 	fmt.Println("OK")
+}
+
+// isEAGAIN reports whether err is an EAGAIN error from a process execution.
+func isEAGAIN(err error) bool {
+	if p, ok := err.(*os.PathError); ok {
+		err = p.Err
+	}
+	return err == syscall.EAGAIN
 }

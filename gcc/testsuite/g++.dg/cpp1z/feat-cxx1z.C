@@ -1,4 +1,5 @@
-// { dg-options "-std=c++1z -I${srcdir}/g++.dg/cpp1y -I${srcdir}/g++.dg/cpp1y/testinc" }
+// { dg-do compile { target c++17 } }
+// { dg-options "-I${srcdir}/g++.dg/cpp1y -I${srcdir}/g++.dg/cpp1y/testinc" }
 
 //  C++98 features:
 
@@ -58,10 +59,10 @@
 #  error "__cpp_attributes != 200809"
 #endif
 
-#ifndef __cpp_rvalue_reference
-#  error "__cpp_rvalue_reference"
-#elif __cpp_rvalue_reference != 200610
-#  error "__cpp_rvalue_reference != 200610"
+#ifndef __cpp_rvalue_references
+#  error "__cpp_rvalue_references"
+#elif __cpp_rvalue_references != 200610
+#  error "__cpp_rvalue_references != 200610"
 #endif
 
 #ifndef __cpp_variadic_templates
@@ -90,8 +91,8 @@
 
 #ifndef __cpp_inheriting_constructors
 #  error "__cpp_inheriting_constructors"
-#elif  __cpp_inheriting_constructors!= 200802
-#  error "__cpp_inheriting_constructors != 200802"
+#elif  __cpp_inheriting_constructors!= 201511
+#  error "__cpp_inheriting_constructors != 201511"
 #endif
 
 #ifndef __cpp_ref_qualifiers
@@ -104,6 +105,12 @@
 #  error "__cpp_alias_templates"
 #elif __cpp_alias_templates != 200704
 #  error "__cpp_alias_templates != 200704"
+#endif
+
+#ifndef __cpp_threadsafe_static_init
+#  error "__cpp_threadsafe_static_init"
+#elif __cpp_threadsafe_static_init != 200806
+#  error "__cpp_threadsafe_static_init != 200806"
 #endif
 
 //  C++14 features:
@@ -128,8 +135,8 @@
 
 #ifndef __cpp_constexpr
 #  error "__cpp_constexpr"
-#elif __cpp_constexpr != 201304
-#  error "__cpp_constexpr != 201304"
+#elif __cpp_constexpr != 201603
+#  error "__cpp_constexpr != 201603"
 #endif
 
 #ifndef __cpp_decltype_auto
@@ -342,4 +349,106 @@
 #  error "__cpp_hex_float"
 #elif __cpp_hex_float != 201603
 #  error "__cpp_hex_float != 201603"
+#endif
+
+#ifndef __cpp_aggregate_bases
+#  error "__cpp_aggregate_bases"
+#elif __cpp_aggregate_bases != 201603
+#  error "__cpp_aggregate_bases != 201603"
+#endif
+
+#ifndef __cpp_deduction_guides
+#  error "__cpp_deduction_guides"
+#elif __cpp_deduction_guides != 201703
+#  error "__cpp_deduction_guides != 201703"
+#endif
+
+#ifndef __cpp_if_constexpr
+#  error "__cpp_if_constexpr"
+#elif __cpp_if_constexpr != 201606
+#  error "__cpp_if_constexpr != 201606"
+#endif
+
+#ifndef __cpp_aligned_new
+#  error "__cpp_aligned_new"
+#elif __cpp_aligned_new != 201606
+#  error "__cpp_aligned_new != 201606"
+#endif
+
+#ifndef __cpp_template_auto
+#  error "__cpp_template_auto"
+#elif __cpp_template_auto != 201606
+#  error "__cpp_template_auto != 201606"
+#endif
+
+#ifndef __cpp_inline_variables
+#  error "__cpp_inline_variables"
+#elif __cpp_inline_variables != 201606
+#  error "__cpp_inline_variables != 201606"
+#endif
+
+#ifndef __cpp_capture_star_this
+#  error "__cpp_capture_star_this"
+#elif __cpp_capture_star_this != 201603
+#  error "__cpp_capture_star_this != 201603"
+#endif
+
+#ifndef __cpp_noexcept_function_type
+#  error "__cpp_noexcept_function_type"
+#elif __cpp_noexcept_function_type != 201510
+#  error "__cpp_noexcept_function_type != 201510"
+#endif
+
+#ifndef __cpp_structured_bindings
+#  error "__cpp_structured_bindings"
+#elif __cpp_structured_bindings != 201606
+#  error "__cpp_structured_bindings != 201606"
+#endif
+
+#ifndef __cpp_template_template_args
+#  error "__cpp_template_template_args"
+#elif __cpp_template_template_args != 201611
+#  error "__cpp_template_template_args != 201611"
+#endif
+
+#ifndef __cpp_variadic_using
+#  error "__cpp_variadic_using"
+#elif __cpp_variadic_using != 201611
+#  error "__cpp_variadic_using != 201611"
+#endif
+
+#ifndef __cpp_guaranteed_copy_elision
+#  error "__cpp_guaranteed_copy_elision"
+#elif __cpp_guaranteed_copy_elision != 201606
+#  error "__cpp_guaranteed_copy_elision != 201606"
+#endif
+
+#ifndef __cpp_nontype_template_parameter_auto
+#  error "__cpp_nontype_template_parameter_auto"
+#elif __cpp_nontype_template_parameter_auto != 201606
+#  error "__cpp_nontype_template_parameter_auto != 201606"
+#endif
+
+#ifdef __has_cpp_attribute
+
+#  if ! __has_cpp_attribute(maybe_unused)
+#    error "__has_cpp_attribute(maybe_unused)"
+#  elif __has_cpp_attribute(maybe_unused) != 201603
+#    error "__has_cpp_attribute(maybe_unused) != 201603"
+#  endif
+
+#  if ! __has_cpp_attribute(nodiscard)
+#    error "__has_cpp_attribute(nodiscard)"
+#  elif __has_cpp_attribute(nodiscard) != 201603
+#    error "__has_cpp_attribute(nodiscard) != 201603"
+#  endif
+
+#  if ! __has_cpp_attribute(fallthrough)
+#    error "__has_cpp_attribute(fallthrough)"
+#  elif __has_cpp_attribute(fallthrough) != 201603
+#    error "__has_cpp_attribute(fallthrough) != 201603"
+#  endif
+
+#else
+#  error "__has_cpp_attribute"
 #endif

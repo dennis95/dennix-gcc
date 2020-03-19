@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -11,7 +11,7 @@ import (
 )
 
 // If the ifindex is zero, interfaceTable returns mappings of all
-// network interfaces.  Otherwise it returns a mapping of a specific
+// network interfaces. Otherwise it returns a mapping of a specific
 // interface.
 func interfaceTable(ifindex int) ([]Interface, error) {
 	tab, err := syscall.NetlinkRIB(syscall.RTM_GETLINK, syscall.AF_UNSPEC)
@@ -115,7 +115,7 @@ func linkFlags(rawFlags uint32) Flags {
 }
 
 // If the ifi is nil, interfaceAddrTable returns addresses for all
-// network interfaces.  Otherwise it returns addresses for a specific
+// network interfaces. Otherwise it returns addresses for a specific
 // interface.
 func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
 	tab, err := syscall.NetlinkRIB(syscall.RTM_GETADDR, syscall.AF_UNSPEC)
@@ -162,7 +162,7 @@ loop:
 				if err != nil {
 					return nil, os.NewSyscallError("parsenetlinkrouteattr", err)
 				}
-				ifa := newAddr(ifi, ifam, attrs)
+				ifa := newAddr(ifam, attrs)
 				if ifa != nil {
 					ifat = append(ifat, ifa)
 				}
@@ -172,7 +172,7 @@ loop:
 	return ifat, nil
 }
 
-func newAddr(ifi *Interface, ifam *syscall.IfAddrmsg, attrs []syscall.NetlinkRouteAttr) Addr {
+func newAddr(ifam *syscall.IfAddrmsg, attrs []syscall.NetlinkRouteAttr) Addr {
 	var ipPointToPoint bool
 	// Seems like we need to make sure whether the IP interface
 	// stack consists of IP point-to-point numbered or unnumbered

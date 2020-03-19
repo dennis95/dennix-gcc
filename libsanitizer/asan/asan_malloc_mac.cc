@@ -36,6 +36,9 @@ using namespace __asan;
 #define COMMON_MALLOC_CALLOC(count, size) \
   GET_STACK_TRACE_MALLOC; \
   void *p = asan_calloc(count, size, &stack);
+#define COMMON_MALLOC_POSIX_MEMALIGN(memptr, alignment, size) \
+  GET_STACK_TRACE_MALLOC; \
+  int res = asan_posix_memalign(memptr, alignment, size, &stack);
 #define COMMON_MALLOC_VALLOC(size) \
   GET_STACK_TRACE_MALLOC; \
   void *p = asan_memalign(GetPageSizeCached(), size, &stack, FROM_MALLOC);
@@ -52,10 +55,6 @@ using namespace __asan;
 #define COMMON_MALLOC_REPORT_UNKNOWN_REALLOC(ptr, zone_ptr, zone_name) \
   GET_STACK_TRACE_FREE; \
   ReportMacMzReallocUnknown((uptr)ptr, (uptr)zone_ptr, zone_name, &stack);
-#define COMMON_MALLOC_IGNORE_INVALID_FREE flags()->mac_ignore_invalid_free
-#define COMMON_MALLOC_REPORT_FREE_UNALLOCATED(ptr, zone_ptr, zone_name) \
-  GET_STACK_TRACE_FREE; \
-  WarnMacFreeUnallocated((uptr)ptr, (uptr)zone_ptr, zone_name, &stack);
 #define COMMON_MALLOC_NAMESPACE __asan
 
 #include "sanitizer_common/sanitizer_malloc_mac.inc"

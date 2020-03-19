@@ -1,5 +1,7 @@
 /* { dg-require-effective-target vect_condition } */
 
+#include "tree-vect.h"
+
 extern void abort (void) __attribute__ ((noreturn));
 
 #define N 27
@@ -27,6 +29,8 @@ main (void)
   21, 22, 23, 24, 25, 26, 27
   };
 
+  check_vect ();
+
   int ret = condition_reduction (a, 46);
 
   /* loop should never have found a value.  */
@@ -36,6 +40,7 @@ main (void)
   return 0;
 }
 
-/* { dg-final { scan-tree-dump-times "LOOP VECTORIZED" 2 "vect" { xfail { ! vect_max_reduc } } } } */
-/* { dg-final { scan-tree-dump-times "condition expression based on integer induction." 4 "vect" { xfail { ! vect_max_reduc } } } } */
+/* { dg-final { scan-tree-dump-times "LOOP VECTORIZED" 2 "vect" } } */
+/* { dg-final { scan-tree-dump-times "optimizing condition reduction with FOLD_EXTRACT_LAST" 4 "vect" { target vect_fold_extract_last } } } */
+/* { dg-final { scan-tree-dump-times "condition expression based on integer induction." 4 "vect" { target { ! vect_fold_extract_last } } } } */
 

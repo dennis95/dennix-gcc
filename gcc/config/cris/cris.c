@@ -1,5 +1,5 @@
 /* Definitions for GCC.  Part of the machine description for CRIS.
-   Copyright (C) 1998-2016 Free Software Foundation, Inc.
+   Copyright (C) 1998-2019 Free Software Foundation, Inc.
    Contributed by Axis Communications.  Written by Hans-Peter Nilsson.
 
 This file is part of GCC.
@@ -18,6 +18,8 @@ You should have received a copy of the GNU General Public License
 along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -25,8 +27,11 @@ along with GCC; see the file COPYING3.  If not see
 #include "target.h"
 #include "rtl.h"
 #include "tree.h"
+#include "stringpool.h"
+#include "attribs.h"
 #include "cfghooks.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "optabs.h"
 #include "regs.h"
@@ -160,6 +165,10 @@ static rtx cris_function_value(const_tree, const_tree, bool);
 static rtx cris_libcall_value (machine_mode, const_rtx);
 static bool cris_function_value_regno_p (const unsigned int);
 static void cris_file_end (void);
+static unsigned int cris_hard_regno_nregs (unsigned int, machine_mode);
+static bool cris_hard_regno_mode_ok (unsigned int, machine_mode);
+static HOST_WIDE_INT cris_static_rtx_alignment (machine_mode);
+static HOST_WIDE_INT cris_constant_alignment (const_tree, HOST_WIDE_INT);
 
 /* This is the parsed result of the "-max-stack-stackframe=" option.  If
    it (still) is zero, then there was no such option given.  */
@@ -212,6 +221,9 @@ int cris_cpu_version = CRIS_DEFAULT_CPU_VERSION;
 #undef TARGET_INIT_LIBFUNCS
 #define TARGET_INIT_LIBFUNCS cris_init_libfuncs
 
+#undef TARGET_LRA_P
+#define TARGET_LRA_P hook_bool_void_false
+
 #undef TARGET_LEGITIMATE_ADDRESS_P
 #define TARGET_LEGITIMATE_ADDRESS_P cris_legitimate_address_p
 
@@ -235,6 +247,9 @@ int cris_cpu_version = CRIS_DEFAULT_CPU_VERSION;
 
 #undef TARGET_ATOMIC_ALIGN_FOR_MODE
 #define TARGET_ATOMIC_ALIGN_FOR_MODE cris_atomic_align_for_mode
+
+#undef TARGET_HAVE_SPECULATION_SAFE_VALUE
+#define TARGET_HAVE_SPECULATION_SAFE_VALUE speculation_safe_value_not_needed
 
 #undef TARGET_STRUCT_VALUE_RTX
 #define TARGET_STRUCT_VALUE_RTX cris_struct_value_rtx
@@ -273,6 +288,16 @@ int cris_cpu_version = CRIS_DEFAULT_CPU_VERSION;
 #define TARGET_LIBCALL_VALUE cris_libcall_value
 #undef TARGET_FUNCTION_VALUE_REGNO_P
 #define TARGET_FUNCTION_VALUE_REGNO_P cris_function_value_regno_p
+
+#undef TARGET_HARD_REGNO_NREGS
+#define TARGET_HARD_REGNO_NREGS cris_hard_regno_nregs
+#undef TARGET_HARD_REGNO_MODE_OK
+#define TARGET_HARD_REGNO_MODE_OK cris_hard_regno_mode_ok
+
+#undef TARGET_STATIC_RTX_ALIGNMENT
+#define TARGET_STATIC_RTX_ALIGNMENT cris_static_rtx_alignment
+#undef TARGET_CONSTANT_ALIGNMENT
+#define TARGET_CONSTANT_ALIGNMENT cris_constant_alignment
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 
@@ -541,11 +566,9 @@ cris_op_str (rtx x)
     {
     case PLUS:
       return "add";
-      break;
 
     case MINUS:
       return "sub";
-      break;
 
     case MULT:
       /* This function is for retrieving a part of an instruction name for
@@ -557,46 +580,36 @@ cris_op_str (rtx x)
 
     case DIV:
       return "div";
-      break;
 
     case AND:
       return "and";
-      break;
 
     case IOR:
       return "or";
-      break;
 
     case XOR:
       return "xor";
-      break;
 
     case NOT:
       return "not";
-      break;
 
     case ASHIFT:
       return "lsl";
-      break;
 
     case LSHIFTRT:
       return "lsr";
-      break;
 
     case ASHIFTRT:
       return "asr";
-      break;
 
     case UMIN:
       /* Used to control the sign/zero-extend character for the 'E' modifier.
 	 BOUND has none.  */
       cris_output_insn_is_bound = 1;
       return "bound";
-      break;
 
     default:
       return "Unknown operator";
-      break;
   }
 }
 
@@ -890,7 +903,7 @@ cris_print_operand (FILE *file, rtx x, int code)
     case ':':
       /* The PIC register.  */
       if (! flag_pic)
-	internal_error ("invalid use of ':' modifier");
+	internal_error ("invalid use of %<:%> modifier");
       fprintf (file, "$%s", reg_names [PIC_OFFSET_TABLE_REGNUM]);
       return;
 
@@ -1282,8 +1295,7 @@ cris_return_address_on_stack_for_return (void)
     : cris_return_address_on_stack ();
 }
 
-/* This used to be the INITIAL_FRAME_POINTER_OFFSET worker; now only
-   handles FP -> SP elimination offset.  */
+/* This handles FP -> SP elimination offset.  */
 
 static int
 cris_initial_frame_pointer_offset (void)
@@ -1606,7 +1618,7 @@ cris_preferred_reload_class (rtx x ATTRIBUTE_UNUSED, reg_class_t rclass)
       && rclass != SRP_REGS
       && rclass != CC0_REGS
       && rclass != SPECIAL_REGS)
-    return GENERAL_REGS;
+    return GENNONACR_REGS;
 
   return rclass;
 }
@@ -2407,7 +2419,7 @@ cris_side_effect_mode_ok (enum rtx_code code, rtx *ops,
    insn for other reasons.  */
 
 bool
-cris_cc0_user_requires_cmp (rtx insn)
+cris_cc0_user_requires_cmp (rtx_insn *insn)
 {
   rtx_insn *cc0_user = NULL;
   rtx body;
@@ -2586,11 +2598,11 @@ cris_asm_output_ident (const char *string)
 /* The ASM_OUTPUT_CASE_END worker.  */
 
 void
-cris_asm_output_case_end (FILE *stream, int num, rtx table)
+cris_asm_output_case_end (FILE *stream, int num, rtx_insn *table)
 {
   /* Step back, over the label for the table, to the actual casejump and
      assert that we find only what's expected.  */
-  rtx whole_jump_insn = prev_nonnote_nondebug_insn (table);
+  rtx_insn *whole_jump_insn = prev_nonnote_nondebug_insn (table);
   gcc_assert (whole_jump_insn != NULL_RTX && LABEL_P (whole_jump_insn));
   whole_jump_insn = prev_nonnote_nondebug_insn (whole_jump_insn);
   gcc_assert (whole_jump_insn != NULL_RTX
@@ -2598,15 +2610,15 @@ cris_asm_output_case_end (FILE *stream, int num, rtx table)
 		  || (TARGET_V32 && INSN_P (whole_jump_insn)
 		      && GET_CODE (PATTERN (whole_jump_insn)) == SEQUENCE)));
   /* Get the pattern of the casejump, so we can extract the default label.  */
-  whole_jump_insn = PATTERN (whole_jump_insn);
+  rtx whole_jump_pat = PATTERN (whole_jump_insn);
 
   if (TARGET_V32)
     {
       /* This can be a SEQUENCE, meaning the delay-slot of the jump is
 	 filled.  We also output the offset word a little differently.  */
       rtx parallel_jump
-	= (GET_CODE (whole_jump_insn) == SEQUENCE
-	   ? PATTERN (XVECEXP (whole_jump_insn, 0, 0)) : whole_jump_insn);
+	= (GET_CODE (whole_jump_pat) == SEQUENCE
+	   ? PATTERN (XVECEXP (whole_jump_pat, 0, 0)) : whole_jump_pat);
 
       asm_fprintf (stream,
 		   "\t.word %LL%d-.%s\n",
@@ -2621,7 +2633,7 @@ cris_asm_output_case_end (FILE *stream, int num, rtx table)
 	       "\t.word %LL%d-%LL%d%s\n",
 	       CODE_LABEL_NUMBER (XEXP
 				  (XEXP
-				   (XEXP (XVECEXP (whole_jump_insn, 0, 0), 1), 
+				   (XEXP (XVECEXP (whole_jump_pat, 0, 0), 1),
 				    2), 0)),
 	       num,
 	       (TARGET_PDEBUG ? "; default" : ""));
@@ -2639,7 +2651,8 @@ cris_option_override (void)
 
       /* Do some sanity checking.  */
       if (cris_max_stackframe < 0 || cris_max_stackframe > 0x20000000)
-	internal_error ("-max-stackframe=%d is not usable, not between 0 and %d",
+	internal_error ("%<-max-stackframe=%d%> is not usable, "
+			"not between 0 and %d",
 			cris_max_stackframe, 0x20000000);
     }
 
@@ -2667,8 +2680,8 @@ cris_option_override (void)
 	cris_cpu_version = 10;
 
       if (cris_cpu_version < 0 || cris_cpu_version > 32)
-	error ("unknown CRIS version specification in -march= or -mcpu= : %s",
-	       cris_cpu_str);
+	error ("unknown CRIS version specification in %<-march=%> or "
+	       "%<-mcpu=%> : %s", cris_cpu_str);
 
       /* Set the target flags.  */
       if (cris_cpu_version >= CRIS_CPU_ETRAX4)
@@ -2703,7 +2716,7 @@ cris_option_override (void)
 	cris_tune = 10;
 
       if (cris_tune < 0 || cris_tune > 32)
-	error ("unknown CRIS cpu version specification in -mtune= : %s",
+	error ("unknown CRIS cpu version specification in %<-mtune=%> : %s",
 	       cris_tune_str);
 
       if (cris_tune >= CRIS_CPU_SVINTO)
@@ -2724,7 +2737,8 @@ cris_option_override (void)
 	 further errors.  */
       if (! TARGET_LINUX)
 	{
-	  error ("-fPIC and -fpic are not supported in this configuration");
+	  error ("%<-fPIC%> and %<-fpic%> are not supported "
+		 "in this configuration");
 	  flag_pic = 0;
 	}
 
@@ -2772,18 +2786,18 @@ cris_asm_output_mi_thunk (FILE *stream,
 	{
 	  fprintf (stream, "\tba ");
 	  assemble_name (stream, name);
-	  fprintf (stream, "%s\n", CRIS_PLT_PCOFFSET_SUFFIX);
+	  fprintf (stream, "%s\n\tnop\n", CRIS_PLT_PCOFFSET_SUFFIX);
 	}
       else
 	{
-	  fprintf (stream, "add.d ");
+	  fprintf (stream, "\tadd.d ");
 	  assemble_name (stream, name);
 	  fprintf (stream, "%s,$pc\n", CRIS_PLT_PCOFFSET_SUFFIX);
 	}
     }
   else
     {
-      fprintf (stream, "jump ");
+      fprintf (stream, "\tjump ");
       assemble_name (stream, XSTR (XEXP (DECL_RTL (funcdecl), 0), 0));
       fprintf (stream, "\n");
 
@@ -4299,6 +4313,64 @@ cris_trampoline_init (rtx m_tramp, tree fndecl, rtx chain_value)
      sake of a trampoline.  */
 }
 
+/* Implement TARGET_HARD_REGNO_NREGS.
+
+   The VOIDmode test is so we can omit mode on anonymous insns.  FIXME:
+   Still needed in 2.9x, at least for Axis-20000319.  */
+
+static unsigned int
+cris_hard_regno_nregs (unsigned int, machine_mode mode)
+{
+  if (mode == VOIDmode)
+    return 1;
+  return CEIL (GET_MODE_SIZE (mode), UNITS_PER_WORD);
+}
+
+/* Implement TARGET_HARD_REGNO_MODE_OK.
+
+   CRIS permits all registers to hold all modes.  Well, except for the
+   condition-code register.  And we can't hold larger-than-register size
+   modes in the last special register that can hold a full 32 bits.  */
+static bool
+cris_hard_regno_mode_ok (unsigned int regno, machine_mode mode)
+{
+  return ((mode == CCmode || regno != CRIS_CC0_REGNUM)
+	  && (GET_MODE_SIZE (mode) <= UNITS_PER_WORD
+	      || (regno != CRIS_MOF_REGNUM && regno != CRIS_ACR_REGNUM)));
+}
+
+/* Return the preferred minimum alignment for a static object.  */
+
+static HOST_WIDE_INT
+cris_preferred_minimum_alignment (void)
+{
+  if (!TARGET_CONST_ALIGN)
+    return 8;
+  if (TARGET_ALIGN_BY_32)
+    return 32;
+  return 16;
+}
+
+/* Implement TARGET_STATIC_RTX_ALIGNMENT.  */
+
+static HOST_WIDE_INT
+cris_static_rtx_alignment (machine_mode mode)
+{
+  return MAX (cris_preferred_minimum_alignment (), GET_MODE_ALIGNMENT (mode));
+}
+
+/* Implement TARGET_CONSTANT_ALIGNMENT.  Note that this hook has the
+   effect of making gcc believe that ALL references to constant stuff
+   (in code segment, like strings) have this alignment.  That is a rather
+   rushed assumption.  Luckily we do not care about the "alignment"
+   operand to builtin memcpy (only place where it counts), so it doesn't
+   affect any bad spots.  */
+
+static HOST_WIDE_INT
+cris_constant_alignment (const_tree, HOST_WIDE_INT basic_align)
+{
+  return MAX (cris_preferred_minimum_alignment (), basic_align);
+}
 
 #if 0
 /* Various small functions to replace macros.  Only called from a

@@ -1,5 +1,5 @@
 /* GCC core type declarations.
-   Copyright (C) 2002-2016 Free Software Foundation, Inc.
+   Copyright (C) 2002-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -46,6 +46,7 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 typedef int64_t gcov_type;
 typedef uint64_t gcov_type_unsigned;
 
+struct bitmap_obstack;
 struct bitmap_head;
 typedef struct bitmap_head *bitmap;
 typedef const struct bitmap_head *const_bitmap;
@@ -55,6 +56,19 @@ typedef const struct simple_bitmap_def *const_sbitmap;
 struct rtx_def;
 typedef struct rtx_def *rtx;
 typedef const struct rtx_def *const_rtx;
+class scalar_mode;
+class scalar_int_mode;
+class scalar_float_mode;
+class complex_mode;
+class fixed_size_mode;
+template<typename> class opt_mode;
+typedef opt_mode<scalar_mode> opt_scalar_mode;
+typedef opt_mode<scalar_int_mode> opt_scalar_int_mode;
+typedef opt_mode<scalar_float_mode> opt_scalar_float_mode;
+template<typename> class pod_mode;
+typedef pod_mode<scalar_mode> scalar_mode_pod;
+typedef pod_mode<scalar_int_mode> scalar_int_mode_pod;
+typedef pod_mode<fixed_size_mode> fixed_size_mode_pod;
 
 /* Subclasses of rtx_def, using indentation to show the class
    hierarchy, along with the relevant invariant.
@@ -121,6 +135,13 @@ struct gomp_single;
 struct gomp_target;
 struct gomp_teams;
 
+/* Subclasses of symtab_node, using indentation to show the class
+   hierarchy.  */
+
+class symtab_node;
+  struct cgraph_node;
+  class varpool_node;
+
 union section;
 typedef union section section;
 struct gcc_options;
@@ -174,6 +195,13 @@ enum offload_abi {
   OFFLOAD_ABI_ILP32
 };
 
+/* Types of profile update methods.  */
+enum profile_update {
+  PROFILE_UPDATE_SINGLE,
+  PROFILE_UPDATE_ATOMIC,
+  PROFILE_UPDATE_PREFER_ATOMIC
+};
+
 /* Types of unwind/exception handling info that can be generated.  */
 
 enum unwind_info_type
@@ -212,6 +240,22 @@ enum optimization_type {
   OPTIMIZE_FOR_SIZE
 };
 
+/* Enumerates a padding direction.  */
+enum pad_direction {
+  /* No padding is required.  */
+  PAD_NONE,
+
+  /* Insert padding above the data, i.e. at higher memeory addresses
+     when dealing with memory, and at the most significant end when
+     dealing with registers.  */
+  PAD_UPWARD,
+
+  /* Insert padding below the data, i.e. at lower memeory addresses
+     when dealing with memory, and at the least significant end when
+     dealing with registers.  */
+  PAD_DOWNWARD
+};
+
 /* Possible initialization status of a variable.   When requested
    by the user, this information is tracked and recorded in the DWARF
    debug information, along with the variable's location.  */
@@ -220,6 +264,30 @@ enum var_init_status
   VAR_INIT_STATUS_UNKNOWN,
   VAR_INIT_STATUS_UNINITIALIZED,
   VAR_INIT_STATUS_INITIALIZED
+};
+
+/* Names for the different levels of -Wstrict-overflow=N.  The numeric
+   values here correspond to N.  */
+enum warn_strict_overflow_code
+{
+  /* Overflow warning that should be issued with -Wall: a questionable
+     construct that is easy to avoid even when using macros.  Example:
+     folding (x + CONSTANT > x) to 1.  */
+  WARN_STRICT_OVERFLOW_ALL = 1,
+  /* Overflow warning about folding a comparison to a constant because
+     of undefined signed overflow, other than cases covered by
+     WARN_STRICT_OVERFLOW_ALL.  Example: folding (abs (x) >= 0) to 1
+     (this is false when x == INT_MIN).  */
+  WARN_STRICT_OVERFLOW_CONDITIONAL = 2,
+  /* Overflow warning about changes to comparisons other than folding
+     them to a constant.  Example: folding (x + 1 > 1) to (x > 0).  */
+  WARN_STRICT_OVERFLOW_COMPARISON = 3,
+  /* Overflow warnings not covered by the above cases.  Example:
+     folding ((x * 10) / 5) to (x * 2).  */
+  WARN_STRICT_OVERFLOW_MISC = 4,
+  /* Overflow warnings about reducing magnitude of constants in
+     comparison.  Example: folding (x + 2 > y) to (x + 1 >= y).  */
+  WARN_STRICT_OVERFLOW_MAGNITUDE = 5
 };
 
 /* The type of an alias set.  Code currently assumes that variables of
@@ -265,6 +333,14 @@ namespace gcc {
 
 typedef std::pair <tree, tree> tree_pair;
 
+/* Define a name->value mapping.  */
+template <typename ValueType>
+struct kv_pair
+{
+  const char *const name;	/* the name of the value */
+  const ValueType value;	/* the value of the name */
+};
+
 #else
 
 struct _dont_use_rtx_here_;
@@ -278,6 +354,11 @@ union _dont_use_tree_here_;
 #define rtx_insn struct _dont_use_rtx_insn_here_
 #define tree union _dont_use_tree_here_ *
 #define const_tree union _dont_use_tree_here_ *
+
+typedef struct scalar_mode scalar_mode;
+typedef struct scalar_int_mode scalar_int_mode;
+typedef struct scalar_float_mode scalar_float_mode;
+typedef struct complex_mode complex_mode;
 
 #endif
 
@@ -301,32 +382,22 @@ enum symbol_visibility
   VISIBILITY_INTERNAL
 };
 
-/* Suppose that higher bits are target dependent. */
-#define MEMMODEL_MASK ((1<<16)-1)
+/* enums used by the targetm.excess_precision hook.  */
 
-/* Legacy sync operations set this upper flag in the memory model.  This allows
-   targets that need to do something stronger for sync operations to
-   differentiate with their target patterns and issue a more appropriate insn
-   sequence.  See bugzilla 65697 for background.  */
-#define MEMMODEL_SYNC (1<<15)
-
-/* Memory model without SYNC bit for targets/operations that do not care.  */
-#define MEMMODEL_BASE_MASK (MEMMODEL_SYNC-1)
-
-/* Memory model types for the __atomic* builtins. 
-   This must match the order in libstdc++-v3/include/bits/atomic_base.h.  */
-enum memmodel
+enum flt_eval_method
 {
-  MEMMODEL_RELAXED = 0,
-  MEMMODEL_CONSUME = 1,
-  MEMMODEL_ACQUIRE = 2,
-  MEMMODEL_RELEASE = 3,
-  MEMMODEL_ACQ_REL = 4,
-  MEMMODEL_SEQ_CST = 5,
-  MEMMODEL_LAST = 6,
-  MEMMODEL_SYNC_ACQUIRE = MEMMODEL_ACQUIRE | MEMMODEL_SYNC,
-  MEMMODEL_SYNC_RELEASE = MEMMODEL_RELEASE | MEMMODEL_SYNC,
-  MEMMODEL_SYNC_SEQ_CST = MEMMODEL_SEQ_CST | MEMMODEL_SYNC
+  FLT_EVAL_METHOD_UNPREDICTABLE = -1,
+  FLT_EVAL_METHOD_PROMOTE_TO_FLOAT = 0,
+  FLT_EVAL_METHOD_PROMOTE_TO_DOUBLE = 1,
+  FLT_EVAL_METHOD_PROMOTE_TO_LONG_DOUBLE = 2,
+  FLT_EVAL_METHOD_PROMOTE_TO_FLOAT16 = 16
+};
+
+enum excess_precision_type
+{
+  EXCESS_PRECISION_TYPE_IMPLICIT,
+  EXCESS_PRECISION_TYPE_STANDARD,
+  EXCESS_PRECISION_TYPE_FAST
 };
 
 /* Support for user-provided GGC and PCH markers.  The first parameter
@@ -337,12 +408,33 @@ typedef void (*gt_pointer_operator) (void *, void *);
 typedef unsigned char uchar;
 #endif
 
-/* Most host source files will require the following headers.  */
-#if !defined (GENERATOR_FILE) && !defined (USED_FOR_TARGET)
-#include "machmode.h"
+/* Most source files will require the following headers.  */
+#if !defined (USED_FOR_TARGET)
+#include "insn-modes.h"
 #include "signop.h"
 #include "wide-int.h" 
+#include "wide-int-print.h"
+
+/* On targets that don't need polynomial offsets, target-specific code
+   should be able to treat poly_int like a normal constant, with a
+   conversion operator going from the former to the latter.  We also
+   allow this for gencondmd.c for all targets, so that we can treat
+   machine_modes as enums without causing build failures.  */
+#if (defined (IN_TARGET_CODE) \
+     && (defined (USE_ENUM_MODES) || NUM_POLY_INT_COEFFS == 1))
+#define POLY_INT_CONVERSION 1
+#else
+#define POLY_INT_CONVERSION 0
+#endif
+
+#include "poly-int.h"
+#include "poly-int-types.h"
+#include "insn-modes-inline.h"
+#include "machmode.h"
 #include "double-int.h"
+#include "align.h"
+/* Most host source files will require the following headers.  */
+#if !defined (GENERATOR_FILE)
 #include "real.h"
 #include "fixed-value.h"
 #include "hash-table.h"
@@ -350,6 +442,8 @@ typedef unsigned char uchar;
 #include "input.h"
 #include "is-a.h"
 #include "memory-block.h"
+#include "dumpfile.h"
+#endif
 #endif /* GENERATOR_FILE && !USED_FOR_TARGET */
 
 #endif /* coretypes.h */

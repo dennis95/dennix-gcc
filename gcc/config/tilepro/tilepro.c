@@ -1,5 +1,5 @@
 /* Subroutines used for code generation on the Tilera TILEPro.
-   Copyright (C) 2011-2016 Free Software Foundation, Inc.
+   Copyright (C) 2011-2019 Free Software Foundation, Inc.
    Contributed by Walter Lee (walt@tilera.com)
 
    This file is part of GCC.
@@ -18,6 +18,8 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -27,8 +29,10 @@
 #include "tree.h"
 #include "gimple.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "stringpool.h"
+#include "attribs.h"
 #include "expmed.h"
 #include "optabs.h"
 #include "regs.h"
@@ -82,18 +86,18 @@ tilepro_option_override (void)
 
 /* Implement TARGET_SCALAR_MODE_SUPPORTED_P.  */
 static bool
-tilepro_scalar_mode_supported_p (machine_mode mode)
+tilepro_scalar_mode_supported_p (scalar_mode mode)
 {
   switch (mode)
     {
-    case QImode:
-    case HImode:
-    case SImode:
-    case DImode:
+    case E_QImode:
+    case E_HImode:
+    case E_SImode:
+    case E_DImode:
       return true;
 
-    case SFmode:
-    case DFmode:
+    case E_SFmode:
+    case E_DFmode:
       return true;
 
     default:
@@ -1206,15 +1210,15 @@ tilepro_simd_int (rtx num, machine_mode mode)
 
   switch (mode)
     {
-    case QImode:
+    case E_QImode:
       n = 0x01010101 * (n & 0x000000FF);
       break;
-    case HImode:
+    case E_HImode:
       n = 0x00010001 * (n & 0x0000FFFF);
       break;
-    case SImode:
+    case E_SImode:
       break;
-    case DImode:
+    case E_DImode:
       break;
     default:
       gcc_unreachable ();
@@ -1687,7 +1691,7 @@ tilepro_expand_unaligned_load (rtx dest_reg, rtx mem, HOST_WIDE_INT bitsize,
 	extract_bit_field (gen_lowpart (SImode, wide_result),
 			   bitsize, bit_offset % BITS_PER_UNIT,
 			   !sign, gen_lowpart (SImode, dest_reg),
-			   SImode, SImode, false);
+			   SImode, SImode, false, NULL);
 
       if (extracted != dest_reg)
 	emit_move_insn (dest_reg, gen_lowpart (SImode, extracted));
@@ -2137,13 +2141,11 @@ tilepro_emit_setcc_internal_di (rtx res, enum rtx_code code, rtx op0, rtx op1)
       emit_insn (gen_insn_seq (tmp1, hi_half[0], hi_half[1]));
       emit_insn (gen_andsi3 (res, tmp0, tmp1));
       return true;
-      break;
     case NE:
       emit_insn (gen_insn_sne (tmp0, lo_half[0], lo_half[1]));
       emit_insn (gen_insn_sne (tmp1, hi_half[0], hi_half[1]));
       emit_insn (gen_iorsi3 (res, tmp0, tmp1));
       return true;
-      break;
     case LE:
       emit_insn (gen_insn_slte (tmp0, hi_half[0], hi_half[1]));
       emit_insn (gen_insn_seq (tmp1, hi_half[0], hi_half[1]));
@@ -2420,9 +2422,8 @@ cbranch_predicted_p (rtx_insn *insn)
 
   if (x)
     {
-      int pred_val = XINT (x, 0);
-
-      return pred_val >= REG_BR_PROB_BASE / 2;
+      return profile_probability::from_reg_br_prob_note (XINT (x, 0))
+	     >= profile_probability::even ();
     }
 
   return false;
@@ -3534,8 +3535,11 @@ tilepro_expand_prologue (void)
   /* Save lr first in its special location because code after this
      might use the link register as a scratch register.  */
   if (df_regs_ever_live_p (TILEPRO_LINK_REGNUM) || crtl->calls_eh_return)
-    FRP (frame_emit_store (TILEPRO_LINK_REGNUM, TILEPRO_LINK_REGNUM,
-			   stack_pointer_rtx, stack_pointer_rtx, 0));
+    {
+      FRP (frame_emit_store (TILEPRO_LINK_REGNUM, TILEPRO_LINK_REGNUM,
+			     stack_pointer_rtx, stack_pointer_rtx, 0));
+      emit_insn (gen_blockage ());
+    }
 
   if (total_size == 0)
     {
@@ -3944,15 +3948,15 @@ get_jump_target (rtx branch)
 
 /* Implement TARGET_SCHED_ADJUST_COST.  */
 static int
-tilepro_sched_adjust_cost (rtx_insn *insn, rtx link, rtx_insn *dep_insn,
-			   int cost)
+tilepro_sched_adjust_cost (rtx_insn *insn, int dep_type, rtx_insn *dep_insn,
+			   int cost, unsigned int)
 {
   /* If we have a true dependence, INSN is a call, and DEP_INSN
      defines a register that is needed by the call (argument or stack
      pointer), set its latency to 0 so that it can be bundled with
      the call.  Explicitly check for and exclude the case when
      DEP_INSN defines the target of the jump.  */
-  if (CALL_P (insn) && REG_NOTE_KIND (link) == REG_DEP_TRUE)
+  if (CALL_P (insn) && dep_type == REG_DEP_TRUE)
     {
       rtx target = get_jump_target (insn);
       if (!REG_P (target) || !set_of (target, dep_insn))
@@ -4470,7 +4474,7 @@ tilepro_trampoline_init (rtx m_tramp, tree fndecl, rtx static_chain)
 					      TRAMPOLINE_SIZE));
 
   emit_library_call (gen_rtx_SYMBOL_REF (Pmode, "__clear_cache"),
-		     LCT_NORMAL, VOIDmode, 2, begin_addr, Pmode,
+		     LCT_NORMAL, VOIDmode, begin_addr, Pmode,
 		     end_addr, Pmode);
 }
 
@@ -4767,8 +4771,7 @@ tilepro_print_operand (FILE *file, rtx x, int code)
 	i = exact_log2 (n);
 	if (i < 0)
 	  {
-	    output_operand_lossage ("invalid %%t operand '"
-				    HOST_WIDE_INT_PRINT_DEC "'", n);
+	    output_operand_lossage ("invalid %%t operand");
 	    return;
 	  }
 
@@ -4950,6 +4953,11 @@ tilepro_file_end (void)
 #undef  TARGET_OPTION_OVERRIDE
 #define TARGET_OPTION_OVERRIDE tilepro_option_override
 
+#ifdef TARGET_THREAD_SSP_OFFSET
+#undef TARGET_STACK_PROTECT_GUARD
+#define TARGET_STACK_PROTECT_GUARD hook_tree_void_null
+#endif
+
 #undef  TARGET_SCALAR_MODE_SUPPORTED_P
 #define TARGET_SCALAR_MODE_SUPPORTED_P tilepro_scalar_mode_supported_p
 
@@ -5017,6 +5025,9 @@ tilepro_file_end (void)
 #undef  TARGET_LEGITIMATE_CONSTANT_P
 #define TARGET_LEGITIMATE_CONSTANT_P tilepro_legitimate_constant_p
 
+#undef TARGET_LRA_P
+#define TARGET_LRA_P hook_bool_void_false
+
 #undef  TARGET_LEGITIMATE_ADDRESS_P
 #define TARGET_LEGITIMATE_ADDRESS_P tilepro_legitimate_address_p
 
@@ -5080,6 +5091,9 @@ tilepro_file_end (void)
 
 #undef  TARGET_CAN_USE_DOLOOP_P
 #define TARGET_CAN_USE_DOLOOP_P can_use_doloop_if_innermost
+
+#undef  TARGET_CONSTANT_ALIGNMENT
+#define TARGET_CONSTANT_ALIGNMENT constant_alignment_word_strings
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

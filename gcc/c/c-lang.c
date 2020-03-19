@@ -1,5 +1,5 @@
 /* Language-specific hook definitions for C front end.
-   Copyright (C) 1991-2016 Free Software Foundation, Inc.
+   Copyright (C) 1991-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -38,7 +38,35 @@ enum c_language_kind c_language = clk_c;
 #undef LANG_HOOKS_INIT_TS
 #define LANG_HOOKS_INIT_TS c_common_init_ts
 
+#if CHECKING_P
+#undef LANG_HOOKS_RUN_LANG_SELFTESTS
+#define LANG_HOOKS_RUN_LANG_SELFTESTS selftest::run_c_tests
+#endif /* #if CHECKING_P */
+
+#undef LANG_HOOKS_GET_SUBSTRING_LOCATION
+#define LANG_HOOKS_GET_SUBSTRING_LOCATION c_get_substring_location
+
 /* Each front end provides its own lang hook initializer.  */
 struct lang_hooks lang_hooks = LANG_HOOKS_INITIALIZER;
+
+#if CHECKING_P
+
+namespace selftest {
+
+/* Implementation of LANG_HOOKS_RUN_LANG_SELFTESTS for the C frontend.  */
+
+void
+run_c_tests (void)
+{
+  /* Run selftests shared within the C family.  */
+  c_family_tests ();
+
+  /* Additional C-specific tests.  */
+}
+
+} // namespace selftest
+
+#endif /* #if CHECKING_P */
+
 
 #include "gtype-c.h"

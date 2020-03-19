@@ -13,9 +13,10 @@ import (
 
 // item represents a token or text string returned from the scanner.
 type item struct {
-	typ itemType // The type of this item.
-	pos Pos      // The starting position, in bytes, of this item in the input string.
-	val string   // The value of this item.
+	typ  itemType // The type of this item.
+	pos  Pos      // The starting position, in bytes, of this item in the input string.
+	val  string   // The value of this item.
+	line int      // The line number at the start of this item.
 }
 
 func (i item) String() string {
@@ -41,7 +42,8 @@ const (
 	itemChar                         // printable ASCII character; grab bag for comma etc.
 	itemCharConstant                 // character constant
 	itemComplex                      // complex constant (1+2i); imaginary is just a number
-	itemColonEquals                  // colon-equals (':=') introducing a declaration
+	itemAssign                       // equals ('=') introducing an assignment
+	itemDeclare                      // colon-equals (':=') introducing a declaration
 	itemEOF
 	itemField      // alphanumeric identifier starting with '.'
 	itemIdentifier // alphanumeric identifier not starting with '.'
@@ -109,13 +111,13 @@ type lexer struct {
 	input      string    // the string being scanned
 	leftDelim  string    // start of action
 	rightDelim string    // end of action
-	state      stateFn   // the next lexing function to enter
 	pos        Pos       // current position in the input
 	start      Pos       // start position of this item
 	width      Pos       // width of last rune read from input
-	lastPos    Pos       // position of most recent item returned by nextItem
 	items      chan item // channel of scanned items
 	parenDepth int       // nesting depth of ( ) exprs
+	line       int       // 1+number of newlines seen
+	startLine  int       // start line of this item
 }
 
 // next returns the next rune in the input.
@@ -127,6 +129,9 @@ func (l *lexer) next() rune {
 	r, w := utf8.DecodeRuneInString(l.input[l.pos:])
 	l.width = Pos(w)
 	l.pos += l.width
+	if r == '\n' {
+		l.line++
+	}
 	return r
 }
 
@@ -140,22 +145,29 @@ func (l *lexer) peek() rune {
 // backup steps back one rune. Can only be called once per call of next.
 func (l *lexer) backup() {
 	l.pos -= l.width
+	// Correct newline count.
+	if l.width == 1 && l.input[l.pos] == '\n' {
+		l.line--
+	}
 }
 
 // emit passes an item back to the client.
 func (l *lexer) emit(t itemType) {
-	l.items <- item{t, l.start, l.input[l.start:l.pos]}
+	l.items <- item{t, l.start, l.input[l.start:l.pos], l.startLine}
 	l.start = l.pos
+	l.startLine = l.line
 }
 
 // ignore skips over the pending input before this point.
 func (l *lexer) ignore() {
+	l.line += strings.Count(l.input[l.start:l.pos], "\n")
 	l.start = l.pos
+	l.startLine = l.line
 }
 
 // accept consumes the next rune if it's from the valid set.
 func (l *lexer) accept(valid string) bool {
-	if strings.IndexRune(valid, l.next()) >= 0 {
+	if strings.ContainsRune(valid, l.next()) {
 		return true
 	}
 	l.backup()
@@ -164,31 +176,22 @@ func (l *lexer) accept(valid string) bool {
 
 // acceptRun consumes a run of runes from the valid set.
 func (l *lexer) acceptRun(valid string) {
-	for strings.IndexRune(valid, l.next()) >= 0 {
+	for strings.ContainsRune(valid, l.next()) {
 	}
 	l.backup()
-}
-
-// lineNumber reports which line we're on, based on the position of
-// the previous item returned by nextItem. Doing it this way
-// means we don't have to worry about peek double counting.
-func (l *lexer) lineNumber() int {
-	return 1 + strings.Count(l.input[:l.lastPos], "\n")
 }
 
 // errorf returns an error token and terminates the scan by passing
 // back a nil pointer that will be the next state, terminating l.nextItem.
 func (l *lexer) errorf(format string, args ...interface{}) stateFn {
-	l.items <- item{itemError, l.start, fmt.Sprintf(format, args...)}
+	l.items <- item{itemError, l.start, fmt.Sprintf(format, args...), l.startLine}
 	return nil
 }
 
 // nextItem returns the next item from the input.
 // Called by the parser, not in the lexing goroutine.
 func (l *lexer) nextItem() item {
-	item := <-l.items
-	l.lastPos = item.pos
-	return item
+	return <-l.items
 }
 
 // drain drains the output so the lexing goroutine will exit.
@@ -212,6 +215,8 @@ func lex(name, input, left, right string) *lexer {
 		leftDelim:  left,
 		rightDelim: right,
 		items:      make(chan item),
+		line:       1,
+		startLine:  1,
 	}
 	go l.run()
 	return l
@@ -219,8 +224,8 @@ func lex(name, input, left, right string) *lexer {
 
 // run runs the state machine for the lexer.
 func (l *lexer) run() {
-	for l.state = lexText; l.state != nil; {
-		l.state = l.state(l)
+	for state := lexText; state != nil; {
+		state = state(l)
 	}
 	close(l.items)
 }
@@ -236,41 +241,31 @@ const (
 
 // lexText scans until an opening action delimiter, "{{".
 func lexText(l *lexer) stateFn {
-	for {
-		delim, trimSpace := l.atLeftDelim()
-		if delim {
-			trimLength := Pos(0)
-			if trimSpace {
-				trimLength = rightTrimLength(l.input[l.start:l.pos])
-			}
-			l.pos -= trimLength
-			if l.pos > l.start {
-				l.emit(itemText)
-			}
-			l.pos += trimLength
-			l.ignore()
-			return lexLeftDelim
+	l.width = 0
+	if x := strings.Index(l.input[l.pos:], l.leftDelim); x >= 0 {
+		ldn := Pos(len(l.leftDelim))
+		l.pos += Pos(x)
+		trimLength := Pos(0)
+		if strings.HasPrefix(l.input[l.pos+ldn:], leftTrimMarker) {
+			trimLength = rightTrimLength(l.input[l.start:l.pos])
 		}
-		if l.next() == eof {
-			break
+		l.pos -= trimLength
+		if l.pos > l.start {
+			l.line += strings.Count(l.input[l.start:l.pos], "\n")
+			l.emit(itemText)
 		}
+		l.pos += trimLength
+		l.ignore()
+		return lexLeftDelim
 	}
+	l.pos = Pos(len(l.input))
 	// Correctly reached EOF.
 	if l.pos > l.start {
+		l.line += strings.Count(l.input[l.start:l.pos], "\n")
 		l.emit(itemText)
 	}
 	l.emit(itemEOF)
 	return nil
-}
-
-// atLeftDelim reports whether the lexer is at a left delimiter, possibly followed by a trim marker.
-func (l *lexer) atLeftDelim() (delim, trimSpaces bool) {
-	if !strings.HasPrefix(l.input[l.pos:], l.leftDelim) {
-		return false, false
-	}
-	// The left delim might have the marker afterwards.
-	trimSpaces = strings.HasPrefix(l.input[l.pos+Pos(len(l.leftDelim)):], leftTrimMarker)
-	return true, trimSpaces
 }
 
 // rightTrimLength returns the length of the spaces at the end of the string.
@@ -284,10 +279,9 @@ func (l *lexer) atRightDelim() (delim, trimSpaces bool) {
 		return true, false
 	}
 	// The right delim might have the marker before.
-	if strings.HasPrefix(l.input[l.pos:], rightTrimMarker) {
-		if strings.HasPrefix(l.input[l.pos+trimMarkerLen:], l.rightDelim) {
-			return true, true
-		}
+	if strings.HasPrefix(l.input[l.pos:], rightTrimMarker) &&
+		strings.HasPrefix(l.input[l.pos+trimMarkerLen:], l.rightDelim) {
+		return true, true
 	}
 	return false, false
 }
@@ -373,11 +367,13 @@ func lexInsideAction(l *lexer) stateFn {
 		return l.errorf("unclosed action")
 	case isSpace(r):
 		return lexSpace
+	case r == '=':
+		l.emit(itemAssign)
 	case r == ':':
 		if l.next() != '=' {
 			return l.errorf("expected :=")
 		}
-		l.emit(itemColonEquals)
+		l.emit(itemDeclare)
 	case r == '|':
 		l.emit(itemPipe)
 	case r == '"':

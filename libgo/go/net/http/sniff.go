@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -13,9 +13,9 @@ import (
 const sniffLen = 512
 
 // DetectContentType implements the algorithm described
-// at http://mimesniff.spec.whatwg.org/ to determine the
-// Content-Type of the given data.  It considers at most the
-// first 512 bytes of data.  DetectContentType always returns
+// at https://mimesniff.spec.whatwg.org/ to determine the
+// Content-Type of the given data. It considers at most the
+// first 512 bytes of data. DetectContentType always returns
 // a valid MIME type: if it cannot determine a more specific one, it
 // returns "application/octet-stream".
 func DetectContentType(data []byte) string {
@@ -91,16 +91,63 @@ var sniffSignatures = []sniffSig{
 		ct:   "image/webp",
 	},
 	&exactSig{[]byte("\x00\x00\x01\x00"), "image/vnd.microsoft.icon"},
-	&exactSig{[]byte("\x4F\x67\x67\x53\x00"), "application/ogg"},
+
 	&maskedSig{
 		mask: []byte("\xFF\xFF\xFF\xFF\x00\x00\x00\x00\xFF\xFF\xFF\xFF"),
 		pat:  []byte("RIFF\x00\x00\x00\x00WAVE"),
 		ct:   "audio/wave",
 	},
+	&maskedSig{
+		mask: []byte("\xFF\xFF\xFF\xFF\x00\x00\x00\x00\xFF\xFF\xFF\xFF"),
+		pat:  []byte("FORM\x00\x00\x00\x00AIFF"),
+		ct:   "audio/aiff",
+	},
+	&maskedSig{
+		mask: []byte("\xFF\xFF\xFF\xFF"),
+		pat:  []byte(".snd"),
+		ct:   "audio/basic",
+	},
+	&maskedSig{
+		mask: []byte("\xFF\xFF\xFF\xFF\xFF"),
+		pat:  []byte("OggS\x00"),
+		ct:   "application/ogg",
+	},
+	&maskedSig{
+		mask: []byte("\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"),
+		pat:  []byte("MThd\x00\x00\x00\x06"),
+		ct:   "audio/midi",
+	},
+	&maskedSig{
+		mask: []byte("\xFF\xFF\xFF"),
+		pat:  []byte("ID3"),
+		ct:   "audio/mpeg",
+	},
+	&maskedSig{
+		mask: []byte("\xFF\xFF\xFF\xFF\x00\x00\x00\x00\xFF\xFF\xFF\xFF"),
+		pat:  []byte("RIFF\x00\x00\x00\x00AVI "),
+		ct:   "video/avi",
+	},
+
+	// Fonts
+	&maskedSig{
+		// 34 NULL bytes followed by the string "LP"
+		pat: []byte("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x4C\x50"),
+		// 34 NULL bytes followed by \xF\xF
+		mask: []byte("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF"),
+		ct:   "application/vnd.ms-fontobject",
+	},
+	&exactSig{[]byte("\x00\x01\x00\x00"), "font/ttf"},
+	&exactSig{[]byte("OTTO"), "font/otf"},
+	&exactSig{[]byte("ttcf"), "font/collection"},
+	&exactSig{[]byte("wOFF"), "font/woff"},
+	&exactSig{[]byte("wOF2"), "font/woff2"},
+
 	&exactSig{[]byte("\x1A\x45\xDF\xA3"), "video/webm"},
 	&exactSig{[]byte("\x52\x61\x72\x20\x1A\x07\x00"), "application/x-rar-compressed"},
 	&exactSig{[]byte("\x50\x4B\x03\x04"), "application/zip"},
 	&exactSig{[]byte("\x1F\x8B\x08"), "application/x-gzip"},
+
+	&exactSig{[]byte("\x00\x61\x73\x6D"), "application/wasm"},
 
 	mp4Sig{},
 
@@ -126,8 +173,14 @@ type maskedSig struct {
 }
 
 func (m *maskedSig) match(data []byte, firstNonWS int) string {
+	// pattern matching algorithm section 6
+	// https://mimesniff.spec.whatwg.org/#pattern-matching-algorithm
+
 	if m.skipWS {
 		data = data[firstNonWS:]
+	}
+	if len(m.pat) != len(m.mask) {
+		return ""
 	}
 	if len(data) < len(m.mask) {
 		return ""

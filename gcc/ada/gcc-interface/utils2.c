@@ -6,7 +6,7 @@
  *                                                                          *
  *                          C Implementation File                           *
  *                                                                          *
- *          Copyright (C) 1992-2016, Free Software Foundation, Inc.         *
+ *          Copyright (C) 1992-2019, Free Software Foundation, Inc.         *
  *                                                                          *
  * GNAT is free software;  you can  redistribute it  and/or modify it under *
  * terms of the  GNU General Public License as published  by the Free Soft- *
@@ -26,6 +26,7 @@
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
+#include "memmodel.h"
 #include "tm.h"
 #include "vec.h"
 #include "alias.h"
@@ -171,6 +172,10 @@ known_alignment (tree exp)
 
     case CALL_EXPR:
       {
+	tree fndecl = get_callee_fndecl (exp);
+	if (fndecl == malloc_decl || fndecl == realloc_decl)
+	  return get_target_system_allocator_alignment () * BITS_PER_UNIT;
+
 	tree t = maybe_inline_call_in_expr (exp);
 	if (t)
 	  return known_alignment (t);
@@ -184,7 +189,8 @@ known_alignment (tree exp)
 	 have a dummy type here (e.g. a Taft Amendment type), for which the
 	 alignment is meaningless and should be ignored.  */
       if (POINTER_TYPE_P (TREE_TYPE (exp))
-	  && !TYPE_IS_DUMMY_P (TREE_TYPE (TREE_TYPE (exp))))
+	  && !TYPE_IS_DUMMY_P (TREE_TYPE (TREE_TYPE (exp)))
+	  && !VOID_TYPE_P (TREE_TYPE (TREE_TYPE (exp))))
 	this_alignment = TYPE_ALIGN (TREE_TYPE (TREE_TYPE (exp)));
       else
 	this_alignment = 0;
@@ -210,27 +216,40 @@ find_common_type (tree t1, tree t2)
      calling into build_binary_op), some others are really expected and we
      have to be careful.  */
 
+  const bool variable_record_on_lhs
+    = (TREE_CODE (t1) == RECORD_TYPE
+       && TREE_CODE (t2) == RECORD_TYPE
+       && get_variant_part (t1)
+       && !get_variant_part (t2));
+
+  const bool variable_array_on_lhs
+    = (TREE_CODE (t1) == ARRAY_TYPE
+       && TREE_CODE (t2) == ARRAY_TYPE
+       && !TREE_CONSTANT (TYPE_MIN_VALUE (TYPE_DOMAIN (t1)))
+       && TREE_CONSTANT (TYPE_MIN_VALUE (TYPE_DOMAIN (t2))));
+
   /* We must avoid writing more than what the target can hold if this is for
      an assignment and the case of tagged types is handled in build_binary_op
      so we use the lhs type if it is known to be smaller or of constant size
      and the rhs type is not, whatever the modes.  We also force t1 in case of
      constant size equality to minimize occurrences of view conversions on the
-     lhs of an assignment, except for the case of record types with a variant
-     part on the lhs but not on the rhs to make the conversion simpler.  */
+     lhs of an assignment, except for the case of types with a variable part
+     on the lhs but not on the rhs to make the conversion simpler.  */
   if (TREE_CONSTANT (TYPE_SIZE (t1))
       && (!TREE_CONSTANT (TYPE_SIZE (t2))
 	  || tree_int_cst_lt (TYPE_SIZE (t1), TYPE_SIZE (t2))
 	  || (TYPE_SIZE (t1) == TYPE_SIZE (t2)
-	      && !(TREE_CODE (t1) == RECORD_TYPE
-		   && TREE_CODE (t2) == RECORD_TYPE
-		   && get_variant_part (t1)
-		   && !get_variant_part (t2)))))
+	      && !variable_record_on_lhs
+	      && !variable_array_on_lhs)))
     return t1;
 
-  /* Otherwise, if the lhs type is non-BLKmode, use it.  Note that we know
-     that we will not have any alignment problems since, if we did, the
-     non-BLKmode type could not have been used.  */
-  if (TYPE_MODE (t1) != BLKmode)
+  /* Otherwise, if the lhs type is non-BLKmode, use it, except for the case of
+     a non-BLKmode rhs and array types with a variable part on the lhs but not
+     on the rhs to make sure the conversion is preserved during gimplification.
+     Note that we know that we will not have any alignment problems since, if
+     we did, the non-BLKmode type could not have been used.  */
+  if (TYPE_MODE (t1) != BLKmode
+      && (TYPE_MODE (t2) == BLKmode || !variable_array_on_lhs))
     return t1;
 
   /* If the rhs type is of constant size, use it whatever the modes.  At
@@ -282,19 +301,31 @@ compare_arrays (location_t loc, tree result_type, tree a1, tree a2)
      in order to suppress the comparison of the data at the end.  */
   while (TREE_CODE (t1) == ARRAY_TYPE && TREE_CODE (t2) == ARRAY_TYPE)
     {
-      tree lb1 = TYPE_MIN_VALUE (TYPE_DOMAIN (t1));
-      tree ub1 = TYPE_MAX_VALUE (TYPE_DOMAIN (t1));
-      tree lb2 = TYPE_MIN_VALUE (TYPE_DOMAIN (t2));
-      tree ub2 = TYPE_MAX_VALUE (TYPE_DOMAIN (t2));
-      tree length1 = size_binop (PLUS_EXPR, size_binop (MINUS_EXPR, ub1, lb1),
+      tree dom1 = TYPE_DOMAIN (t1);
+      tree dom2 = TYPE_DOMAIN (t2);
+      tree length1 = size_binop (PLUS_EXPR,
+				 size_binop (MINUS_EXPR,
+					     TYPE_MAX_VALUE (dom1),
+					     TYPE_MIN_VALUE (dom1)),
 				 size_one_node);
-      tree length2 = size_binop (PLUS_EXPR, size_binop (MINUS_EXPR, ub2, lb2),
+      tree length2 = size_binop (PLUS_EXPR,
+				 size_binop (MINUS_EXPR,
+					     TYPE_MAX_VALUE (dom2),
+					     TYPE_MIN_VALUE (dom2)),
 				 size_one_node);
+      tree ind1 = TYPE_INDEX_TYPE (dom1);
+      tree ind2 = TYPE_INDEX_TYPE (dom2);
+      tree base_type = maybe_character_type (get_base_type (ind1));
+      tree lb1 = convert (base_type, TYPE_MIN_VALUE (ind1));
+      tree ub1 = convert (base_type, TYPE_MAX_VALUE (ind1));
+      tree lb2 = convert (base_type, TYPE_MIN_VALUE (ind2));
+      tree ub2 = convert (base_type, TYPE_MAX_VALUE (ind2));
       tree comparison, this_a1_is_null, this_a2_is_null;
 
-      /* If the length of the first array is a constant, swap our operands
-	 unless the length of the second array is the constant zero.  */
-      if (TREE_CODE (length1) == INTEGER_CST && !integer_zerop (length2))
+      /* If the length of the first array is a constant and that of the second
+	 array is not, swap our operands to have the constant second.  */
+      if (TREE_CODE (length1) == INTEGER_CST
+	  && TREE_CODE (length2) != INTEGER_CST)
 	{
 	  tree tem;
 	  bool btem;
@@ -314,17 +345,12 @@ compare_arrays (location_t loc, tree result_type, tree a1, tree a2)
 	 last < first holds.  */
       if (integer_zerop (length2))
 	{
-	  tree b = get_base_type (TYPE_INDEX_TYPE (TYPE_DOMAIN (t1)));
-
 	  length_zero_p = true;
 
-	  ub1
-	    = convert (b, TYPE_MAX_VALUE (TYPE_INDEX_TYPE (TYPE_DOMAIN (t1))));
-	  lb1
-	    = convert (b, TYPE_MIN_VALUE (TYPE_INDEX_TYPE (TYPE_DOMAIN (t1))));
+	  lb1 = SUBSTITUTE_PLACEHOLDER_IN_EXPR (lb1, a1);
+	  ub1 = SUBSTITUTE_PLACEHOLDER_IN_EXPR (ub1, a1);
 
 	  comparison = fold_build2_loc (loc, LT_EXPR, result_type, ub1, lb1);
-	  comparison = SUBSTITUTE_PLACEHOLDER_IN_EXPR (comparison, a1);
 	  if (EXPR_P (comparison))
 	    SET_EXPR_LOCATION (comparison, loc);
 
@@ -337,24 +363,17 @@ compare_arrays (location_t loc, tree result_type, tree a1, tree a2)
 	 just use its length computed from the actual stored bounds.  */
       else if (TREE_CODE (length2) == INTEGER_CST)
 	{
-	  tree b = get_base_type (TYPE_INDEX_TYPE (TYPE_DOMAIN (t1)));
-
-	  ub1
-	    = convert (b, TYPE_MAX_VALUE (TYPE_INDEX_TYPE (TYPE_DOMAIN (t1))));
-	  lb1
-	    = convert (b, TYPE_MIN_VALUE (TYPE_INDEX_TYPE (TYPE_DOMAIN (t1))));
-	  /* Note that we know that UB2 and LB2 are constant and hence
+	  /* Note that we know that LB2 and UB2 are constant and hence
 	     cannot contain a PLACEHOLDER_EXPR.  */
-	  ub2
-	    = convert (b, TYPE_MAX_VALUE (TYPE_INDEX_TYPE (TYPE_DOMAIN (t2))));
-	  lb2
-	    = convert (b, TYPE_MIN_VALUE (TYPE_INDEX_TYPE (TYPE_DOMAIN (t2))));
+	  lb1 = SUBSTITUTE_PLACEHOLDER_IN_EXPR (lb1, a1);
+	  ub1 = SUBSTITUTE_PLACEHOLDER_IN_EXPR (ub1, a1);
 
 	  comparison
 	    = fold_build2_loc (loc, EQ_EXPR, result_type,
-			       build_binary_op (MINUS_EXPR, b, ub1, lb1),
-			       build_binary_op (MINUS_EXPR, b, ub2, lb2));
-	  comparison = SUBSTITUTE_PLACEHOLDER_IN_EXPR (comparison, a1);
+			       build_binary_op (MINUS_EXPR, base_type,
+						ub1, lb1),
+			       build_binary_op (MINUS_EXPR, base_type,
+						ub2, lb2));
 	  if (EXPR_P (comparison))
 	    SET_EXPR_LOCATION (comparison, loc);
 
@@ -372,26 +391,20 @@ compare_arrays (location_t loc, tree result_type, tree a1, tree a2)
 
 	  comparison
 	    = fold_build2_loc (loc, EQ_EXPR, result_type, length1, length2);
+	  if (EXPR_P (comparison))
+	    SET_EXPR_LOCATION (comparison, loc);
 
-	  /* If the length expression is of the form (cond ? val : 0), assume
-	     that cond is equivalent to (length != 0).  That's guaranteed by
-	     construction of the array types in gnat_to_gnu_entity.  */
-	  if (TREE_CODE (length1) == COND_EXPR
-	      && integer_zerop (TREE_OPERAND (length1, 2)))
-	    this_a1_is_null
-	      = invert_truthvalue_loc (loc, TREE_OPERAND (length1, 0));
-	  else
-	    this_a1_is_null = fold_build2_loc (loc, EQ_EXPR, result_type,
-					       length1, size_zero_node);
+	  lb1 = SUBSTITUTE_PLACEHOLDER_IN_EXPR (lb1, a1);
+	  ub1 = SUBSTITUTE_PLACEHOLDER_IN_EXPR (ub1, a1);
 
-	  /* Likewise for the second array.  */
-	  if (TREE_CODE (length2) == COND_EXPR
-	      && integer_zerop (TREE_OPERAND (length2, 2)))
-	    this_a2_is_null
-	      = invert_truthvalue_loc (loc, TREE_OPERAND (length2, 0));
-	  else
-	    this_a2_is_null = fold_build2_loc (loc, EQ_EXPR, result_type,
-					       length2, size_zero_node);
+	  this_a1_is_null
+	    = fold_build2_loc (loc, LT_EXPR, result_type, ub1, lb1);
+
+	  lb2 = SUBSTITUTE_PLACEHOLDER_IN_EXPR (lb2, a2);
+	  ub2 = SUBSTITUTE_PLACEHOLDER_IN_EXPR (ub2, a2);
+
+	  this_a2_is_null
+	    = fold_build2_loc (loc, LT_EXPR, result_type, ub2, lb2);
 	}
 
       /* Append expressions for this dimension to the final expressions.  */
@@ -560,8 +573,8 @@ nonbinary_modular_operation (enum tree_code op_code, tree type, tree lhs,
   if (TYPE_PRECISION (op_type) < precision
       || TYPE_UNSIGNED (op_type) != unsignedp)
     {
-      /* Copy the node so we ensure it can be modified to make it modular.  */
-      op_type = copy_node (gnat_type_for_size (precision, unsignedp));
+      /* Copy the type so we ensure it can be modified to make it modular.  */
+      op_type = copy_type (gnat_type_for_size (precision, unsignedp));
       modulus = convert (op_type, modulus);
       SET_TYPE_MODULUS (op_type, modulus);
       TYPE_MODULAR_P (op_type) = 1;
@@ -577,7 +590,8 @@ nonbinary_modular_operation (enum tree_code op_code, tree type, tree lhs,
      possible size.  */
   if (op_code == MULT_EXPR)
     {
-      tree div_type = copy_node (gnat_type_for_size (needed_precision, 1));
+      /* Copy the type so we ensure it can be modified to make it modular.  */
+      tree div_type = copy_type (gnat_type_for_size (needed_precision, 1));
       modulus = convert (div_type, modulus);
       SET_TYPE_MODULUS (div_type, modulus);
       TYPE_MODULAR_P (div_type) = 1;
@@ -780,7 +794,8 @@ build_load_modify_store (tree dest, tree src, Node_Id gnat_node)
 		{
 		  unsigned int size = tree_to_uhwi (TYPE_SIZE (type));
 		  type = copy_type (type);
-		  SET_TYPE_MODE (type, mode_for_size (size, MODE_INT, 0));
+		  machine_mode mode = int_mode_for_size (size, 0).else_blk ();
+		  SET_TYPE_MODE (type, mode);
 		}
 
 	      /* Create the temporary by inserting a SAVE_EXPR.  */
@@ -815,6 +830,7 @@ build_load_modify_store (tree dest, tree src, Node_Id gnat_node)
    in that type.  For INIT_EXPR and MODIFY_EXPR, RESULT_TYPE must be
    NULL_TREE.  For ARRAY_REF, RESULT_TYPE may be NULL_TREE, in which
    case the type to be used will be derived from the operands.
+   Don't fold the result if NO_FOLD is true.
 
    This function is very much unlike the ones for C and C++ since we
    have already done any type conversion and matching required.  All we
@@ -822,7 +838,8 @@ build_load_modify_store (tree dest, tree src, Node_Id gnat_node)
 
 tree
 build_binary_op (enum tree_code op_code, tree result_type,
-                 tree left_operand, tree right_operand)
+		 tree left_operand, tree right_operand,
+		 bool no_fold)
 {
   tree left_type = TREE_TYPE (left_operand);
   tree right_type = TREE_TYPE (right_operand);
@@ -838,9 +855,7 @@ build_binary_op (enum tree_code op_code, tree result_type,
       && TYPE_JUSTIFIED_MODULAR_P (operation_type))
     operation_type = TREE_TYPE (TYPE_FIELDS (operation_type));
 
-  if (operation_type
-      && TREE_CODE (operation_type) == INTEGER_TYPE
-      && TYPE_EXTRA_SUBTYPE_P (operation_type))
+  if (operation_type && TYPE_IS_EXTRA_SUBTYPE_P (operation_type))
     operation_type = get_base_type (operation_type);
 
   modulus = (operation_type
@@ -1264,10 +1279,16 @@ build_binary_op (enum tree_code op_code, tree result_type,
   else if (TREE_CODE (right_operand) == NULL_EXPR)
     return build1 (NULL_EXPR, operation_type, TREE_OPERAND (right_operand, 0));
   else if (op_code == ARRAY_REF || op_code == ARRAY_RANGE_REF)
-    result = fold (build4 (op_code, operation_type, left_operand,
-			   right_operand, NULL_TREE, NULL_TREE));
+    {
+      result = build4 (op_code, operation_type, left_operand, right_operand,
+		       NULL_TREE, NULL_TREE);
+      if (!no_fold)
+	result = fold (result);
+    }
   else if (op_code == INIT_EXPR || op_code == MODIFY_EXPR)
     result = build2 (op_code, void_type_node, left_operand, right_operand);
+  else if (no_fold)
+    result = build2 (op_code, operation_type, left_operand, right_operand);
   else
     result
       = fold_build2 (op_code, operation_type, left_operand, right_operand);
@@ -1288,8 +1309,13 @@ build_binary_op (enum tree_code op_code, tree result_type,
   /* If we are working with modular types, perform the MOD operation
      if something above hasn't eliminated the need for it.  */
   if (modulus)
-    result = fold_build2 (FLOOR_MOD_EXPR, operation_type, result,
-			  convert (operation_type, modulus));
+    {
+      modulus = convert (operation_type, modulus);
+      if (no_fold)
+	result = build2 (FLOOR_MOD_EXPR, operation_type, result, modulus);
+      else
+	result = fold_build2 (FLOOR_MOD_EXPR, operation_type, result, modulus);
+    }
 
   if (result_type && result_type != operation_type)
     result = convert (result_type, result);
@@ -1405,15 +1431,15 @@ build_unary_op (enum tree_code op_code, tree result_type, tree operand)
 	       the offset to the field.  Otherwise, do this the normal way.  */
 	  if (op_code == ATTR_ADDR_EXPR)
 	    {
-	      HOST_WIDE_INT bitsize;
-	      HOST_WIDE_INT bitpos;
+	      poly_int64 bitsize;
+	      poly_int64 bitpos;
 	      tree offset, inner;
 	      machine_mode mode;
 	      int unsignedp, reversep, volatilep;
 
 	      inner = get_inner_reference (operand, &bitsize, &bitpos, &offset,
 					   &mode, &unsignedp, &reversep,
-					   &volatilep, false);
+					   &volatilep);
 
 	      /* If INNER is a padding type whose field has a self-referential
 		 size, convert to that inner type.  We know the offset is zero
@@ -1426,8 +1452,9 @@ build_unary_op (enum tree_code op_code, tree result_type, tree operand)
 	      if (!offset)
 		offset = size_zero_node;
 
-	      offset = size_binop (PLUS_EXPR, offset,
-				   size_int (bitpos / BITS_PER_UNIT));
+	      offset
+		= size_binop (PLUS_EXPR, offset,
+			      size_int (bits_to_bytes_round_down (bitpos)));
 
 	      /* Take the address of INNER, convert it to a pointer to our type
 		 and add the offset.  */
@@ -1753,17 +1780,19 @@ build_call_n_expr (tree fndecl, int n, ...)
    MSG gives the exception's identity for the call to Local_Raise, if any.  */
 
 static tree
-build_goto_raise (tree label, int msg)
+build_goto_raise (Entity_Id gnat_label, int msg)
 {
-  tree gnu_result = build1 (GOTO_EXPR, void_type_node, label);
+  tree gnu_label = gnat_to_gnu_entity (gnat_label, NULL_TREE, false);
+  tree gnu_result = build1 (GOTO_EXPR, void_type_node, gnu_label);
   Entity_Id local_raise = Get_Local_Raise_Call_Entity ();
 
   /* If Local_Raise is present, build Local_Raise (Exception'Identity).  */
   if (Present (local_raise))
     {
-      tree gnu_local_raise = gnat_to_gnu_entity (local_raise, NULL_TREE, 0);
+      tree gnu_local_raise
+	= gnat_to_gnu_entity (local_raise, NULL_TREE, false);
       tree gnu_exception_entity
-	= gnat_to_gnu_entity (Get_RT_Exception_Entity (msg), NULL_TREE, 0);
+	= gnat_to_gnu_entity (Get_RT_Exception_Entity (msg), NULL_TREE, false);
       tree gnu_call
 	= build_call_n_expr (gnu_local_raise, 1,
 			     build_unary_op (ADDR_EXPR, NULL_TREE,
@@ -1772,6 +1801,7 @@ build_goto_raise (tree label, int msg)
 	= build2 (COMPOUND_EXPR, void_type_node, gnu_call, gnu_result);
     }
 
+  TREE_USED (gnu_label) = 1;
   return gnu_result;
 }
 
@@ -1824,13 +1854,13 @@ expand_sloc (Node_Id gnat_node, tree *filename, tree *line, tree *col)
 tree
 build_call_raise (int msg, Node_Id gnat_node, char kind)
 {
+  Entity_Id gnat_label = get_exception_label (kind);
   tree fndecl = gnat_raise_decls[msg];
-  tree label = get_exception_label (kind);
   tree filename, line;
 
   /* If this is to be done as a goto, handle that case.  */
-  if (label)
-    return build_goto_raise (label, msg);
+  if (Present (gnat_label))
+    return build_goto_raise (gnat_label, msg);
 
   expand_sloc (gnat_node, &filename, &line, NULL);
 
@@ -1848,13 +1878,13 @@ build_call_raise (int msg, Node_Id gnat_node, char kind)
 tree
 build_call_raise_column (int msg, Node_Id gnat_node, char kind)
 {
+  Entity_Id gnat_label = get_exception_label (kind);
   tree fndecl = gnat_raise_decls_ext[msg];
-  tree label = get_exception_label (kind);
   tree filename, line, col;
 
   /* If this is to be done as a goto, handle that case.  */
-  if (label)
-    return build_goto_raise (label, msg);
+  if (Present (gnat_label))
+    return build_goto_raise (gnat_label, msg);
 
   expand_sloc (gnat_node, &filename, &line, &col);
 
@@ -1873,13 +1903,13 @@ tree
 build_call_raise_range (int msg, Node_Id gnat_node, char kind,
 			tree index, tree first, tree last)
 {
+  Entity_Id gnat_label = get_exception_label (kind);
   tree fndecl = gnat_raise_decls_ext[msg];
-  tree label = get_exception_label (kind);
   tree filename, line, col;
 
   /* If this is to be done as a goto, handle that case.  */
-  if (label)
-    return build_goto_raise (label, msg);
+  if (Present (gnat_label))
+    return build_goto_raise (gnat_label, msg);
 
   expand_sloc (gnat_node, &filename, &line, &col);
 
@@ -1900,8 +1930,8 @@ build_call_raise_range (int msg, Node_Id gnat_node, char kind,
 static int
 compare_elmt_bitpos (const PTR rt1, const PTR rt2)
 {
-  const constructor_elt * const elmt1 = (const constructor_elt * const) rt1;
-  const constructor_elt * const elmt2 = (const constructor_elt * const) rt2;
+  const constructor_elt * const elmt1 = (const constructor_elt *) rt1;
+  const constructor_elt * const elmt2 = (const constructor_elt *) rt2;
   const_tree const field1 = elmt1->index;
   const_tree const field2 = elmt2->index;
   const int ret
@@ -2266,8 +2296,6 @@ build_call_alloc_dealloc (tree gnu_obj, tree gnu_size, tree gnu_type,
                           Entity_Id gnat_proc, Entity_Id gnat_pool,
                           Node_Id gnat_node)
 {
-  gnu_size = SUBSTITUTE_PLACEHOLDER_IN_EXPR (gnu_size, gnu_obj);
-
   /* Explicit proc to call ?  This one is assumed to deal with the type
      alignment constraints.  */
   if (Present (gnat_proc))
@@ -2316,6 +2344,12 @@ build_allocator (tree type, tree init, tree result_type, Entity_Id gnat_proc,
   /* If the initializer, if present, is a NULL_EXPR, just return a new one.  */
   if (init && TREE_CODE (init) == NULL_EXPR)
     return build1 (NULL_EXPR, result_type, TREE_OPERAND (init, 0));
+
+  /* If we are just annotating types, also return a NULL_EXPR.  */
+  else if (type_annotate_only)
+    return build1 (NULL_EXPR, result_type,
+		   build_call_raise (CE_Range_Check_Failed, gnat_node,
+				     N_Raise_Constraint_Error));
 
   /* If the initializer, if present, is a COND_EXPR, deal with each branch.  */
   else if (init && TREE_CODE (init) == COND_EXPR)
@@ -2389,16 +2423,13 @@ build_allocator (tree type, tree init, tree result_type, Entity_Id gnat_proc,
     size = TYPE_SIZE_UNIT (TREE_TYPE (init));
 
   /* If the size is still self-referential, reference the initializing
-     expression, if it is present.  If not, this must have been a
-     call to allocate a library-level object, in which case we use
-     the maximum size.  */
-  if (CONTAINS_PLACEHOLDER_P (size))
-    {
-      if (!ignore_init_type && init)
-	size = substitute_placeholder_in_expr (size, init);
-      else
-	size = max_size (size, true);
-    }
+     expression, if it is present.  If not, this must have been a call
+     to allocate a library-level object, in which case we just use the
+     maximum size.  */
+  if (!ignore_init_type && init)
+    size = SUBSTITUTE_PLACEHOLDER_IN_EXPR (size, init);
+  else if (CONTAINS_PLACEHOLDER_P (size))
+    size = max_size (size, true);
 
   /* If the size overflows, pass -1 so Storage_Error will be raised.  */
   if (TREE_CODE (size) == INTEGER_CST && !valid_constant_size_p (size))
@@ -2508,7 +2539,7 @@ gnat_save_expr (tree exp)
   if (code == COMPONENT_REF
       && TYPE_IS_FAT_POINTER_P (TREE_TYPE (TREE_OPERAND (exp, 0))))
     return build3 (code, type, gnat_save_expr (TREE_OPERAND (exp, 0)),
-		   TREE_OPERAND (exp, 1), TREE_OPERAND (exp, 2));
+		   TREE_OPERAND (exp, 1), NULL_TREE);
 
   return save_expr (exp);
 }
@@ -2554,13 +2585,19 @@ gnat_protect_expr (tree exp)
       return t;
     }
 
+  /* Likewise if we're indirectly referencing part of something.  */
+  if (code == COMPONENT_REF
+      && TREE_CODE (TREE_OPERAND (exp, 0)) == INDIRECT_REF)
+    return build3 (code, type, gnat_protect_expr (TREE_OPERAND (exp, 0)),
+		   TREE_OPERAND (exp, 1), NULL_TREE);
+
   /* If this is a COMPONENT_REF of a fat pointer, save the entire fat pointer.
      This may be more efficient, but will also allow us to more easily find
      the match for the PLACEHOLDER_EXPR.  */
   if (code == COMPONENT_REF
       && TYPE_IS_FAT_POINTER_P (TREE_TYPE (TREE_OPERAND (exp, 0))))
     return build3 (code, type, gnat_protect_expr (TREE_OPERAND (exp, 0)),
-		   TREE_OPERAND (exp, 1), TREE_OPERAND (exp, 2));
+		   TREE_OPERAND (exp, 1), NULL_TREE);
 
   /* If this is a fat pointer or a scalar, just make a SAVE_EXPR.  Likewise
      for a CALL_EXPR as large objects are returned via invisible reference
@@ -2573,9 +2610,7 @@ gnat_protect_expr (tree exp)
   /* Otherwise reference, protect the address and dereference.  */
   return
     build_unary_op (INDIRECT_REF, type,
-		    save_expr (build_unary_op (ADDR_EXPR,
-					       build_reference_type (type),
-					       exp)));
+		    save_expr (build_unary_op (ADDR_EXPR, NULL_TREE, exp)));
 }
 
 /* This is equivalent to stabilize_reference_1 in tree.c but we take an extra
@@ -2608,7 +2643,7 @@ gnat_stabilize_reference_1 (tree e, void *data)
 	result
 	  = build3 (code, type,
 		    gnat_stabilize_reference_1 (TREE_OPERAND (e, 0), data),
-		    TREE_OPERAND (e, 1), TREE_OPERAND (e, 2));
+		    TREE_OPERAND (e, 1), NULL_TREE);
       /* If the expression has side-effects, then encase it in a SAVE_EXPR
 	 so that it will only be evaluated once.  */
       /* The tcc_reference and tcc_comparison classes could be handled as
@@ -2716,7 +2751,7 @@ gnat_rewrite_reference (tree ref, rewrite_fn func, void *data, tree *init)
 		  gnat_rewrite_reference (TREE_OPERAND (ref, 0), func, data,
 					  init),
 		  func (TREE_OPERAND (ref, 1), data),
-		  TREE_OPERAND (ref, 2), TREE_OPERAND (ref, 3));
+		  TREE_OPERAND (ref, 2), NULL_TREE);
       break;
 
     case COMPOUND_EXPR:
@@ -2794,9 +2829,6 @@ get_inner_constant_reference (tree exp)
 	  break;
 
 	case COMPONENT_REF:
-	  if (TREE_OPERAND (exp, 2))
-	    return NULL_TREE;
-
 	  if (!TREE_CONSTANT (DECL_FIELD_OFFSET (TREE_OPERAND (exp, 1))))
 	    return NULL_TREE;
 	  break;
@@ -2804,7 +2836,7 @@ get_inner_constant_reference (tree exp)
 	case ARRAY_REF:
 	case ARRAY_RANGE_REF:
 	  {
-	    if (TREE_OPERAND (exp, 2) || TREE_OPERAND (exp, 3))
+	    if (TREE_OPERAND (exp, 2))
 	      return NULL_TREE;
 
 	    tree array_type = TREE_TYPE (TREE_OPERAND (exp, 0));
@@ -2932,16 +2964,12 @@ gnat_invariant_expr (tree expr)
       switch (TREE_CODE (t))
 	{
 	case COMPONENT_REF:
-	  if (TREE_OPERAND (t, 2))
-	    return NULL_TREE;
 	  invariant_p |= DECL_INVARIANT_P (TREE_OPERAND (t, 1));
 	  break;
 
 	case ARRAY_REF:
 	case ARRAY_RANGE_REF:
-	  if (!TREE_CONSTANT (TREE_OPERAND (t, 1))
-	      || TREE_OPERAND (t, 2)
-	      || TREE_OPERAND (t, 3))
+	  if (!TREE_CONSTANT (TREE_OPERAND (t, 1)) || TREE_OPERAND (t, 2))
 	    return NULL_TREE;
 	  break;
 

@@ -1,5 +1,5 @@
 /* Configuration file for ARM GNU/Linux EABI targets.
-   Copyright (C) 2004-2016 Free Software Foundation, Inc.
+   Copyright (C) 2004-2019 Free Software Foundation, Inc.
    Contributed by CodeSourcery, LLC   
 
    This file is part of GCC.
@@ -30,6 +30,9 @@
     }						\
   while (false)
 
+#define EXTRA_TARGET_D_OS_VERSIONS()		\
+  ANDROID_TARGET_D_OS_VERSIONS();
+
 /* We default to a soft-float ABI so that binaries can run on all
    target hardware.  If you override this to use the hard-float ABI then
    change the setting of GLIBC_DYNAMIC_LINKER_DEFAULT as well.  */
@@ -40,12 +43,6 @@
    default.  */
 #undef  ARM_DEFAULT_ABI
 #define ARM_DEFAULT_ABI ARM_ABI_AAPCS_LINUX
-
-/* Default to armv5t so that thumb shared libraries work.
-   The ARM10TDMI core is the default for armv5t, so set
-   SUBTARGET_CPU_DEFAULT to achieve this.  */
-#undef  SUBTARGET_CPU_DEFAULT
-#define SUBTARGET_CPU_DEFAULT TARGET_CPU_arm10tdmi
 
 /* TARGET_BIG_ENDIAN_DEFAULT is set in
    config.gcc for big endian configurations.  */

@@ -19,7 +19,7 @@ program reduction
      do j = 1, n
         vsum = vsum + 1;
      end do
-     if (vsum .ne. arr(i)) call abort ()
+     if (vsum .ne. arr(i)) STOP 1
   end do
 end program reduction
 
@@ -45,12 +45,12 @@ subroutine redsub_private(sum, n, arr)
 
   ! verify the results
   do i = 1, 10
-     if (arr(i) .ne. 100+i) call abort ()
+     if (arr(i) .ne. 100+i) STOP 2
   end do
 end subroutine redsub_private
 
 
-! Bogus reduction on an impliclitly firstprivate variable.  The results do
+! Bogus reduction on a firstprivate variable.  The results do
 ! survive the parallel region.  The goal here is to ensure that gfortran
 ! doesn't ICE.
 
@@ -58,7 +58,7 @@ subroutine redsub_bogus(sum, n)
   integer :: sum, n, arr(n)
   integer :: i
 
-  !$acc parallel
+  !$acc parallel firstprivate(sum)
   !$acc loop gang worker vector reduction (+:sum)
   do i = 1, n
      sum = sum + 1
@@ -72,7 +72,7 @@ subroutine redsub_combined(sum, n, arr)
   integer :: sum, n, arr(n)
   integer :: i, j
 
-  !$acc parallel copy (arr)
+  !$acc parallel copy (arr) firstprivate(sum)
   !$acc loop gang
   do i = 1, n
      sum = i;

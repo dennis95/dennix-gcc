@@ -19,7 +19,7 @@ program reduction
   hs1 = 0
   hs2 = 0
 
-  !$acc parallel num_gangs (1000) copy(gs1, gs2)
+  !$acc parallel num_gangs (1000)
   !$acc loop reduction(+:gs1, gs2) gang
   do i = 1, n
      gs1 = gs1 + 1
@@ -27,7 +27,7 @@ program reduction
   end do
   !$acc end parallel
 
-  !$acc parallel num_workers (4) vector_length (32) copy(ws1, ws2)
+  !$acc parallel num_workers (4) vector_length (32)
   !$acc loop reduction(+:ws1, ws2) worker
   do i = 1, n
      ws1 = ws1 + 1
@@ -35,7 +35,7 @@ program reduction
   end do
   !$acc end parallel
 
-  !$acc parallel vector_length (32) copy(vs1, vs2)
+  !$acc parallel vector_length (32)
   !$acc loop reduction(+:vs1, vs2) vector
   do i = 1, n
      vs1 = vs1 + 1
@@ -43,7 +43,7 @@ program reduction
   end do
   !$acc end parallel
 
-  !$acc parallel num_gangs(8) num_workers(4) vector_length(32) copy(cs1, cs2)
+  !$acc parallel num_gangs(8) num_workers(4) vector_length(32)
   !$acc loop reduction(+:cs1, cs2) gang worker vector
   do i = 1, n
      cs1 = cs1 + 1
@@ -57,24 +57,24 @@ program reduction
      hs2 = hs2 + 2
   end do
 
-  if (gs1 .ne. hs1) call abort ()
-  if (gs2 .ne. hs2) call abort ()
+  if (gs1 .ne. hs1) STOP 1
+  if (gs2 .ne. hs2) STOP 2
 
-  if (ws1 .ne. hs1) call abort ()
-  if (ws2 .ne. hs2) call abort ()
+  if (ws1 .ne. hs1) STOP 3
+  if (ws2 .ne. hs2) STOP 4
 
-  if (vs1 .ne. hs1) call abort ()
-  if (vs2 .ne. hs2) call abort ()
+  if (vs1 .ne. hs1) STOP 5
+  if (vs2 .ne. hs2) STOP 6
 
-  if (cs1 .ne. hs1) call abort ()
-  if (cs2 .ne. hs2) call abort ()
+  if (cs1 .ne. hs1) STOP 7
+  if (cs2 .ne. hs2) STOP 8
 
   ! Nested reductions.
 
   red = 0
   vred = 0
 
-  !$acc parallel num_gangs(10) vector_length(32) copy(red)
+  !$acc parallel num_gangs(10) vector_length(32)
   !$acc loop reduction(+:red) gang
   do i = 1, n/chunksize
      !$acc loop reduction(+:red) vector
@@ -90,5 +90,5 @@ program reduction
      end do
   end do
 
-  if (red .ne. vred) call abort ()
+  if (red .ne. vred) STOP 9
 end program reduction

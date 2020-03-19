@@ -1,7 +1,7 @@
-// { dg-do run }
+// { dg-do run { target c++17 } }
 // { dg-options "-std=gnu++17" }
 
-// Copyright (C) 2015-2016 Free Software Foundation, Inc.
+// Copyright (C) 2015-2019 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -24,8 +24,6 @@
 #include <vector>
 #include <testsuite_hooks.h>
 
-bool test __attribute__((unused)) = true;
-
 void
 test01()
 {
@@ -47,7 +45,7 @@ test02()
   static_assert(!e);
 }
 
-int
+void
 test03()
 {
   std::initializer_list<int> il{1,2,3};
@@ -57,17 +55,16 @@ test03()
   std::initializer_list<int> il2{};
   VERIFY(std::size(il2) == 0);
   VERIFY(std::empty(il2));
-  constexpr std::initializer_list<int> il3{1,2,3};
+  static constexpr std::initializer_list<int> il3{1,2,3};
   constexpr auto d = std::data(il3);
   static_assert(d == il3.begin());
   constexpr auto s = std::size(il3);
   static_assert(s == 3);
   constexpr auto e = std::empty(il3);
   static_assert(!e);
-
 }
 
-int
+void
 test04()
 {
   std::vector<int> v{1,2,3};

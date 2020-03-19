@@ -27,7 +27,6 @@ type dumpTest struct {
 }
 
 var dumpTests = []dumpTest{
-
 	// HTTP/1.1 => chunked coding; body; empty trailer
 	{
 		Req: http.Request{
@@ -122,6 +121,10 @@ var dumpTests = []dumpTest{
 				Host:   "post.tld",
 				Path:   "/",
 			},
+			Header: http.Header{
+				"Content-Length": []string{"8193"},
+			},
+
 			ContentLength: 8193,
 			ProtoMajor:    1,
 			ProtoMinor:    1,
@@ -135,6 +138,10 @@ var dumpTests = []dumpTest{
 			"Content-Length: 8193\r\n" +
 			"Accept-Encoding: gzip\r\n\r\n" +
 			strings.Repeat("a", 8193),
+		WantDump: "POST / HTTP/1.1\r\n" +
+			"Host: post.tld\r\n" +
+			"Content-Length: 8193\r\n\r\n" +
+			strings.Repeat("a", 8193),
 	},
 
 	{
@@ -143,6 +150,50 @@ var dumpTests = []dumpTest{
 		NoBody: true,
 		WantDump: "GET http://foo.com/ HTTP/1.1\r\n" +
 			"User-Agent: blah\r\n\r\n",
+	},
+
+	// Issue #7215. DumpRequest should return the "Content-Length" when set
+	{
+		Req: *mustReadRequest("POST /v2/api/?login HTTP/1.1\r\n" +
+			"Host: passport.myhost.com\r\n" +
+			"Content-Length: 3\r\n" +
+			"\r\nkey1=name1&key2=name2"),
+		WantDump: "POST /v2/api/?login HTTP/1.1\r\n" +
+			"Host: passport.myhost.com\r\n" +
+			"Content-Length: 3\r\n" +
+			"\r\nkey",
+	},
+
+	// Issue #7215. DumpRequest should return the "Content-Length" in ReadRequest
+	{
+		Req: *mustReadRequest("POST /v2/api/?login HTTP/1.1\r\n" +
+			"Host: passport.myhost.com\r\n" +
+			"Content-Length: 0\r\n" +
+			"\r\nkey1=name1&key2=name2"),
+		WantDump: "POST /v2/api/?login HTTP/1.1\r\n" +
+			"Host: passport.myhost.com\r\n" +
+			"Content-Length: 0\r\n\r\n",
+	},
+
+	// Issue #7215. DumpRequest should not return the "Content-Length" if unset
+	{
+		Req: *mustReadRequest("POST /v2/api/?login HTTP/1.1\r\n" +
+			"Host: passport.myhost.com\r\n" +
+			"\r\nkey1=name1&key2=name2"),
+		WantDump: "POST /v2/api/?login HTTP/1.1\r\n" +
+			"Host: passport.myhost.com\r\n\r\n",
+	},
+
+	// Issue 18506: make drainBody recognize NoBody. Otherwise
+	// this was turning into a chunked request.
+	{
+		Req: *mustNewRequest("POST", "http://example.com/foo", http.NoBody),
+
+		WantDumpOut: "POST /foo HTTP/1.1\r\n" +
+			"Host: example.com\r\n" +
+			"User-Agent: Go-http-client/1.1\r\n" +
+			"Content-Length: 0\r\n" +
+			"Accept-Encoding: gzip\r\n\r\n",
 	},
 }
 
@@ -162,7 +213,6 @@ func TestDumpRequest(t *testing.T) {
 				t.Fatalf("Test %d: unsupported Body of %T", i, tt.Body)
 			}
 		}
-		setBody()
 		if tt.Req.Header == nil {
 			tt.Req.Header = make(http.Header)
 		}
@@ -288,6 +338,27 @@ Transfer-Encoding: chunked
 foo
 0`,
 	},
+	{
+		res: &http.Response{
+			Status:        "200 OK",
+			StatusCode:    200,
+			Proto:         "HTTP/1.1",
+			ProtoMajor:    1,
+			ProtoMinor:    1,
+			ContentLength: 0,
+			Header: http.Header{
+				// To verify if headers are not filtered out.
+				"Foo1": []string{"Bar1"},
+				"Foo2": []string{"Bar2"},
+			},
+			Body: nil,
+		},
+		body: false, // to verify we see 0, not empty.
+		want: `HTTP/1.1 200 OK
+Foo1: Bar1
+Foo2: Bar2
+Content-Length: 0`,
+	},
 }
 
 func TestDumpResponse(t *testing.T) {
@@ -299,7 +370,7 @@ func TestDumpResponse(t *testing.T) {
 		}
 		got := string(gotb)
 		got = strings.TrimSpace(got)
-		got = strings.Replace(got, "\r", "", -1)
+		got = strings.ReplaceAll(got, "\r", "")
 
 		if got != tt.want {
 			t.Errorf("%d.\nDumpResponse got:\n%s\n\nWant:\n%s\n", i, got, tt.want)

@@ -1,6 +1,6 @@
 /* Operating system specific defines to be used when targeting GCC for
    hosting on Windows32, using a Unix style C library and tools.
-   Copyright (C) 1995-2016 Free Software Foundation, Inc.
+   Copyright (C) 1995-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -19,7 +19,6 @@ along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
 #define DBX_DEBUGGING_INFO 1
-#define SDB_DEBUGGING_INFO 1
 #if TARGET_64BIT_DEFAULT || defined (HAVE_GAS_PE_SECREL32_RELOC)
 #define DWARF2_DEBUGGING_INFO 1
 #endif
@@ -102,13 +101,16 @@ along with GCC; see the file COPYING3.  If not see
 /* Use section relative relocations for debugging offsets.  Unlike
    other targets that fake this by putting the section VMA at 0, PE
    won't allow it.  */
-#define ASM_OUTPUT_DWARF_OFFSET(FILE, SIZE, LABEL, SECTION)	\
+#define ASM_OUTPUT_DWARF_OFFSET(FILE, SIZE, LABEL, OFFSET, SECTION) \
   do {								\
     switch (SIZE)						\
       {								\
       case 4:							\
 	fputs ("\t.secrel32\t", FILE);				\
 	assemble_name (FILE, LABEL);				\
+	if ((OFFSET) != 0)					\
+	  fprintf (FILE, "+" HOST_WIDE_INT_PRINT_DEC,		\
+		   (HOST_WIDE_INT) (OFFSET));			\
 	break;							\
       case 8:							\
 	/* This is a hack.  There is no 64-bit section relative	\
@@ -118,6 +120,9 @@ along with GCC; see the file COPYING3.  If not see
 	   Fake the 64-bit offset by zero-extending it.  */	\
 	fputs ("\t.secrel32\t", FILE);				\
 	assemble_name (FILE, LABEL);				\
+	if ((OFFSET) != 0)					\
+	  fprintf (FILE, "+" HOST_WIDE_INT_PRINT_DEC,		\
+		   (HOST_WIDE_INT) (OFFSET));			\
 	fputs ("\n\t.long\t0", FILE);				\
 	break;							\
       default:							\
@@ -263,9 +268,6 @@ do {						\
    bytes in one go.  */
 #define CHECK_STACK_LIMIT 4000
 
-#undef STACK_BOUNDARY
-#define STACK_BOUNDARY	(TARGET_64BIT && ix86_abi == MS_ABI ? 128 : BITS_PER_WORD)
-
 /* By default, target has a 80387, uses IEEE compatible arithmetic,
    returns float values in the 387 and needs stack probes.
    We also align doubles to 64-bits for MSVC default compatibility.  */
@@ -285,7 +287,7 @@ do {						\
 
 #undef ASM_OUTPUT_ALIGN
 #define ASM_OUTPUT_ALIGN(FILE,LOG)	\
-    if ((LOG)!=0) fprintf ((FILE), "\t.align %d\n", 1<<(LOG))
+    if ((LOG) != 0) fprintf ((FILE), "\t.align %d\n", 1 << (LOG))
 
 /* Windows uses explicit import from shared libraries.  */
 #define MULTIPLE_SYMBOL_SPACES 1
@@ -302,15 +304,31 @@ do {						\
 #define TARGET_SECTION_TYPE_FLAGS  i386_pe_section_type_flags
 
 /* Write the extra assembler code needed to declare a function
-   properly.  If we are generating SDB debugging information, this
-   will happen automatically, so we only need to handle other cases.  */
+   properly.  */
 #undef ASM_DECLARE_FUNCTION_NAME
 #define ASM_DECLARE_FUNCTION_NAME(FILE, NAME, DECL) \
   i386_pe_start_function (FILE, NAME, DECL)
 
+/* Write the extra assembler code needed to declare the name of a
+   cold function partition properly.  */
+
+#undef ASM_DECLARE_COLD_FUNCTION_NAME
+#define ASM_DECLARE_COLD_FUNCTION_NAME(FILE, NAME, DECL)	\
+  do								\
+    {								\
+      i386_pe_declare_function_type (FILE, NAME, 0);		\
+      i386_pe_seh_cold_init (FILE, NAME);			\
+      ASM_OUTPUT_LABEL (FILE, NAME);				\
+    }								\
+  while (0)
+
 #undef ASM_DECLARE_FUNCTION_SIZE
 #define ASM_DECLARE_FUNCTION_SIZE(FILE,NAME,DECL) \
   i386_pe_end_function (FILE, NAME, DECL)
+
+#undef ASM_DECLARE_COLD_FUNCTION_SIZE
+#define ASM_DECLARE_COLD_FUNCTION_SIZE(FILE,NAME,DECL) \
+  i386_pe_end_cold_function (FILE, NAME, DECL)
 
 /* Add an external function to the list of functions to be declared at
    the end of the file.  */
@@ -335,27 +353,27 @@ do {						\
 #undef TARGET_ASM_FILE_END
 #define TARGET_ASM_FILE_END i386_pe_file_end
 
+/* Kludge because of missing PE-COFF support for early LTO debug.  */
+#undef  TARGET_ASM_LTO_START
+#define TARGET_ASM_LTO_START i386_pe_asm_lto_start
+#undef  TARGET_ASM_LTO_END
+#define TARGET_ASM_LTO_END i386_pe_asm_lto_end
+
 #undef ASM_COMMENT_START
 #define ASM_COMMENT_START " #"
 
 #ifndef DWARF2_UNWIND_INFO
-/* If configured with --disable-sjlj-exceptions, use DWARF2, else
-   default to SJLJ.  */
+/* If configured with --disable-sjlj-exceptions, use DWARF2 for 32-bit
+   mode else default to SJLJ.  64-bit code uses SEH unless you request
+   SJLJ.  */
 #if  (defined (CONFIG_SJLJ_EXCEPTIONS) && !CONFIG_SJLJ_EXCEPTIONS)
 /* The logic of this #if must be kept synchronised with the logic
-   for selecting the tmake_eh_file fragment in config.gcc.  */
+   for selecting the tmake_eh_file fragment in libgcc/config.host.  */
 #define DWARF2_UNWIND_INFO 1
-/* If multilib is selected break build as sjlj is required.  */
-#if defined (TARGET_BI_ARCH)
-#error For 64-bit windows and 32-bit based multilib version of gcc just SJLJ exceptions are supported.
-#endif
 #else
 #define DWARF2_UNWIND_INFO 0
 #endif
 #endif
-
-/* Don't assume anything about the header files.  */
-#define NO_IMPLICIT_EXTERN_C
 
 #undef PROFILE_HOOK
 #define PROFILE_HOOK(LABEL)						\
@@ -402,11 +420,6 @@ do {						\
 #define BIGGEST_FIELD_ALIGNMENT 64
 #endif
 
-/* A bit-field declared as `int' forces `int' alignment for the struct.  */
-#undef PCC_BITFIELD_TYPE_MATTERS
-#define PCC_BITFIELD_TYPE_MATTERS 1
-#define GROUP_BITFIELDS_BY_ALIGN TYPE_NATIVE(rec)
-
 /* Enable alias attribute support.  */
 #ifndef SET_ASM_OP
 #define SET_ASM_OP "\t.set\t"
@@ -440,21 +453,16 @@ do {						\
 
 #endif /* HAVE_GAS_WEAK */
 
-/* FIXME: SUPPORTS_WEAK && TARGET_HAVE_NAMED_SECTIONS is true,
-   but for .jcr section to work we also need crtbegin and crtend
-   objects.  */
-#define TARGET_USE_JCR_SECTION 1
-
 /* Decide whether it is safe to use a local alias for a virtual function
    when constructing thunks.  */
 #undef TARGET_USE_LOCAL_THUNK_ALIAS_P
 #define TARGET_USE_LOCAL_THUNK_ALIAS_P(DECL) (!DECL_ONE_ONLY (DECL))
 
 #define SUBTARGET_ATTRIBUTE_TABLE \
-  { "selectany", 0, 0, true, false, false, ix86_handle_selectany_attribute, \
-    false }
-  /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
+  { "selectany", 0, 0, true, false, false, false, \
+    ix86_handle_selectany_attribute, NULL }
+  /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
+       affects_type_identity, handler, exclude } */
 
 /*  mcount() does not need a counter variable.  */
 #undef NO_PROFILE_COUNTERS
@@ -472,3 +480,7 @@ do {						\
 
 /* Static stack checking is supported by means of probes.  */
 #define STACK_CHECK_STATIC_BUILTIN 1
+
+#ifndef HAVE_GAS_ALIGNED_COMM
+# define HAVE_GAS_ALIGNED_COMM 0
+#endif

@@ -2,15 +2,20 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// +build !js
+
 package net
 
 import (
+	"context"
 	"fmt"
+	"internal/poll"
 	"io"
 	"io/ioutil"
 	"net/internal/socktest"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,14 +91,18 @@ second:
 		return nil
 	}
 	switch err := nestedErr.(type) {
-	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *timeoutError, UnknownNetworkError:
+	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *poll.TimeoutError, UnknownNetworkError:
 		return nil
 	case *os.SyscallError:
 		nestedErr = err.Err
 		goto third
+	case *os.PathError: // for Plan 9
+		nestedErr = err.Err
+		goto third
 	}
 	switch nestedErr {
-	case errCanceled, errClosing, errMissingAddress:
+	case errCanceled, poll.ErrNetClosing, errMissingAddress, errNoSuitableAddress,
+		context.DeadlineExceeded, context.Canceled:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -135,7 +144,7 @@ func TestDialError(t *testing.T) {
 
 	origTestHookLookupIP := testHookLookupIP
 	defer func() { testHookLookupIP = origTestHookLookupIP }()
-	testHookLookupIP = func(fn func(string) ([]IPAddr, error), host string) ([]IPAddr, error) {
+	testHookLookupIP = func(ctx context.Context, fn func(context.Context, string, string) ([]IPAddr, error), network, host string) ([]IPAddr, error) {
 		return nil, &DNSError{Err: "dial error test", Name: "name", Server: "server", IsTimeout: true}
 	}
 	sw.Set(socktest.FilterConnect, func(so *socktest.Status) (socktest.AfterFilter, error) {
@@ -203,6 +212,62 @@ func TestProtocolDialError(t *testing.T) {
 	}
 }
 
+func TestDialAddrError(t *testing.T) {
+	switch runtime.GOOS {
+	case "nacl", "plan9":
+		t.Skipf("not supported on %s", runtime.GOOS)
+	}
+	if !supportsIPv4() || !supportsIPv6() {
+		t.Skip("both IPv4 and IPv6 are required")
+	}
+
+	for _, tt := range []struct {
+		network string
+		lit     string
+		addr    *TCPAddr
+	}{
+		{"tcp4", "::1", nil},
+		{"tcp4", "", &TCPAddr{IP: IPv6loopback}},
+		// We don't test the {"tcp6", "byte sequence", nil}
+		// case for now because there is no easy way to
+		// control name resolution.
+		{"tcp6", "", &TCPAddr{IP: IP{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef}}},
+	} {
+		var err error
+		var c Conn
+		var op string
+		if tt.lit != "" {
+			c, err = Dial(tt.network, JoinHostPort(tt.lit, "0"))
+			op = fmt.Sprintf("Dial(%q, %q)", tt.network, JoinHostPort(tt.lit, "0"))
+		} else {
+			c, err = DialTCP(tt.network, nil, tt.addr)
+			op = fmt.Sprintf("DialTCP(%q, %q)", tt.network, tt.addr)
+		}
+		if err == nil {
+			c.Close()
+			t.Errorf("%s succeeded, want error", op)
+			continue
+		}
+		if perr := parseDialError(err); perr != nil {
+			t.Errorf("%s: %v", op, perr)
+			continue
+		}
+		operr := err.(*OpError).Err
+		aerr, ok := operr.(*AddrError)
+		if !ok {
+			t.Errorf("%s: %v is %T, want *AddrError", op, err, operr)
+			continue
+		}
+		want := tt.lit
+		if tt.lit == "" {
+			want = tt.addr.IP.String()
+		}
+		if aerr.Addr != want {
+			t.Errorf("%s: %v, error Addr=%q, want %q", op, err, aerr.Addr, want)
+		}
+	}
+}
+
 var listenErrorTests = []struct {
 	network, address string
 }{
@@ -228,7 +293,7 @@ func TestListenError(t *testing.T) {
 
 	origTestHookLookupIP := testHookLookupIP
 	defer func() { testHookLookupIP = origTestHookLookupIP }()
-	testHookLookupIP = func(fn func(string) ([]IPAddr, error), host string) ([]IPAddr, error) {
+	testHookLookupIP = func(_ context.Context, fn func(context.Context, string, string) ([]IPAddr, error), network, host string) ([]IPAddr, error) {
 		return nil, &DNSError{Err: "listen error test", Name: "name", Server: "server", IsTimeout: true}
 	}
 	sw.Set(socktest.FilterListen, func(so *socktest.Status) (socktest.AfterFilter, error) {
@@ -288,7 +353,7 @@ func TestListenPacketError(t *testing.T) {
 
 	origTestHookLookupIP := testHookLookupIP
 	defer func() { testHookLookupIP = origTestHookLookupIP }()
-	testHookLookupIP = func(fn func(string) ([]IPAddr, error), host string) ([]IPAddr, error) {
+	testHookLookupIP = func(_ context.Context, fn func(context.Context, string, string) ([]IPAddr, error), network, host string) ([]IPAddr, error) {
 		return nil, &DNSError{Err: "listen error test", Name: "name", Server: "server", IsTimeout: true}
 	}
 
@@ -371,7 +436,7 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errClosing, errTimeout:
+	case poll.ErrNetClosing, poll.ErrTimeout:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -406,14 +471,14 @@ second:
 		return nil
 	}
 	switch err := nestedErr.(type) {
-	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *timeoutError, UnknownNetworkError:
+	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *poll.TimeoutError, UnknownNetworkError:
 		return nil
 	case *os.SyscallError:
 		nestedErr = err.Err
 		goto third
 	}
 	switch nestedErr {
-	case errCanceled, errClosing, errTimeout, ErrWriteToConnected, io.ErrUnexpectedEOF:
+	case errCanceled, poll.ErrNetClosing, errMissingAddress, poll.ErrTimeout, ErrWriteToConnected, io.ErrUnexpectedEOF:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -428,9 +493,19 @@ third:
 // parseCloseError parses nestedErr and reports whether it is a valid
 // error value from Close functions.
 // It returns nil when nestedErr is valid.
-func parseCloseError(nestedErr error) error {
+func parseCloseError(nestedErr error, isShutdown bool) error {
 	if nestedErr == nil {
 		return nil
+	}
+
+	// Because historically we have not exported the error that we
+	// return for an operation on a closed network connection,
+	// there are programs that test for the exact error string.
+	// Verify that string here so that we don't break those
+	// programs unexpectedly. See issues #4373 and #19252.
+	want := "use of closed network connection"
+	if !isShutdown && !strings.Contains(nestedErr.Error(), want) {
+		return fmt.Errorf("error string %q does not contain expected string %q", nestedErr, want)
 	}
 
 	switch err := nestedErr.(type) {
@@ -456,13 +531,17 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errClosing:
+	case poll.ErrNetClosing:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
 
 third:
 	if isPlatformError(nestedErr) {
+		return nil
+	}
+	switch nestedErr {
+	case os.ErrClosed: // for Plan 9
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 3rd nested level: %T", nestedErr)
@@ -482,23 +561,23 @@ func TestCloseError(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		err = c.(*TCPConn).CloseRead()
-		if perr := parseCloseError(err); perr != nil {
+		if perr := parseCloseError(err, true); perr != nil {
 			t.Errorf("#%d: %v", i, perr)
 		}
 	}
 	for i := 0; i < 3; i++ {
 		err = c.(*TCPConn).CloseWrite()
-		if perr := parseCloseError(err); perr != nil {
+		if perr := parseCloseError(err, true); perr != nil {
 			t.Errorf("#%d: %v", i, perr)
 		}
 	}
 	for i := 0; i < 3; i++ {
 		err = c.Close()
-		if perr := parseCloseError(err); perr != nil {
+		if perr := parseCloseError(err, false); perr != nil {
 			t.Errorf("#%d: %v", i, perr)
 		}
 		err = ln.Close()
-		if perr := parseCloseError(err); perr != nil {
+		if perr := parseCloseError(err, false); perr != nil {
 			t.Errorf("#%d: %v", i, perr)
 		}
 	}
@@ -511,7 +590,7 @@ func TestCloseError(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		err = pc.Close()
-		if perr := parseCloseError(err); perr != nil {
+		if perr := parseCloseError(err, false); perr != nil {
 			t.Errorf("#%d: %v", i, perr)
 		}
 	}
@@ -543,9 +622,12 @@ second:
 	case *os.SyscallError:
 		nestedErr = err.Err
 		goto third
+	case *os.PathError: // for Plan 9
+		nestedErr = err.Err
+		goto third
 	}
 	switch nestedErr {
-	case errClosing, errTimeout:
+	case poll.ErrNetClosing, poll.ErrTimeout:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -624,7 +706,7 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errClosing:
+	case poll.ErrNetClosing:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -702,4 +784,18 @@ func TestFileError(t *testing.T) {
 		}
 		ln.Close()
 	}
+}
+
+func parseLookupPortError(nestedErr error) error {
+	if nestedErr == nil {
+		return nil
+	}
+
+	switch nestedErr.(type) {
+	case *AddrError, *DNSError:
+		return nil
+	case *os.PathError: // for Plan 9
+		return nil
+	}
+	return fmt.Errorf("unexpected type on 1st nested level: %T", nestedErr)
 }

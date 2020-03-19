@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -57,10 +57,10 @@ func Clearenv() {
 	for _, s := range Environ() {
 		// Environment variables can begin with =
 		// so start looking for the separator = at j=1.
-		// http://blogs.msdn.com/b/oldnewthing/archive/2010/05/06/10008132.aspx
+		// https://blogs.msdn.com/b/oldnewthing/archive/2010/05/06/10008132.aspx
 		for j := 1; j < len(s); j++ {
 			if s[j] == '=' {
-				Setenv(s[0:j], "")
+				Unsetenv(s[0:j])
 				break
 			}
 		}

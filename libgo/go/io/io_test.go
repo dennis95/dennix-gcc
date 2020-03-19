@@ -32,6 +32,21 @@ func TestCopy(t *testing.T) {
 	}
 }
 
+func TestCopyNegative(t *testing.T) {
+	rb := new(Buffer)
+	wb := new(Buffer)
+	rb.WriteString("hello")
+	Copy(wb, &LimitedReader{R: rb, N: -1})
+	if wb.String() != "" {
+		t.Errorf("Copy on LimitedReader with N<0 copied data")
+	}
+
+	CopyN(wb, rb, -1)
+	if wb.String() != "" {
+		t.Errorf("CopyN with N<0 copied data")
+	}
+}
+
 func TestCopyBuffer(t *testing.T) {
 	rb := new(Buffer)
 	wb := new(Buffer)
@@ -153,6 +168,30 @@ func TestCopyNWriteTo(t *testing.T) {
 	CopyN(wb, rb, 5)
 	if wb.String() != "hello" {
 		t.Errorf("CopyN did not work properly")
+	}
+}
+
+func BenchmarkCopyNSmall(b *testing.B) {
+	bs := bytes.Repeat([]byte{0}, 512+1)
+	rd := bytes.NewReader(bs)
+	buf := new(Buffer)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		CopyN(buf, rd, 512)
+		rd.Reset(bs)
+	}
+}
+
+func BenchmarkCopyNLarge(b *testing.B) {
+	bs := bytes.Repeat([]byte{0}, (32*1024)+1)
+	rd := bytes.NewReader(bs)
+	buf := new(Buffer)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		CopyN(buf, rd, 32*1024)
+		rd.Reset(bs)
 	}
 }
 
@@ -347,7 +386,7 @@ func TestSectionReader_Seek(t *testing.T) {
 	br := bytes.NewReader([]byte("foo"))
 	sr := NewSectionReader(br, 0, int64(len("foo")))
 
-	for whence := 0; whence <= 2; whence++ {
+	for _, whence := range []int{SeekStart, SeekCurrent, SeekEnd} {
 		for offset := int64(-3); offset <= 4; offset++ {
 			brOff, brErr := br.Seek(offset, whence)
 			srOff, srErr := sr.Seek(offset, whence)
@@ -359,7 +398,7 @@ func TestSectionReader_Seek(t *testing.T) {
 	}
 
 	// And verify we can just seek past the end and get an EOF
-	got, err := sr.Seek(100, 0)
+	got, err := sr.Seek(100, SeekStart)
 	if err != nil || got != 100 {
 		t.Errorf("Seek = %v, %v; want 100, nil", got, err)
 	}

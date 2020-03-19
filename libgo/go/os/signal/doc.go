@@ -11,7 +11,7 @@ package on Windows and Plan 9, see below.
 Types of signals
 
 The signals SIGKILL and SIGSTOP may not be caught by a program, and
-therefore can not be affected by this package.
+therefore cannot be affected by this package.
 
 Synchronous signals are signals triggered by errors in program
 execution: SIGBUS, SIGFPE, and SIGSEGV. These are only considered
@@ -181,10 +181,11 @@ If the Go runtime sees an existing signal handler for the SIGCANCEL or
 SIGSETXID signals (which are used only on GNU/Linux), it will turn on
 the SA_ONSTACK flag and otherwise keep the signal handler.
 
-For the synchronous signals, the Go runtime will install a signal
-handler. It will save any existing signal handler. If a synchronous
-signal arrives while executing non-Go code, the Go runtime will invoke
-the existing signal handler instead of the Go signal handler.
+For the synchronous signals and SIGPIPE, the Go runtime will install a
+signal handler. It will save any existing signal handler. If a
+synchronous signal arrives while executing non-Go code, the Go runtime
+will invoke the existing signal handler instead of the Go signal
+handler.
 
 Go code built with -buildmode=c-archive or -buildmode=c-shared will
 not install any other signal handlers by default. If there is an
@@ -205,8 +206,8 @@ before raising the signal.
 Windows
 
 On Windows a ^C (Control-C) or ^BREAK (Control-Break) normally cause
-the program to exit. If Notify is called for os.SIGINT, ^C or ^BREAK
-will cause os.SIGINT to be sent on the channel, and the program will
+the program to exit. If Notify is called for os.Interrupt, ^C or ^BREAK
+will cause os.Interrupt to be sent on the channel, and the program will
 not exit. If Reset is called, or Stop is called on all channels passed
 to Notify, then the default behavior will be restored.
 

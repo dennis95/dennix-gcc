@@ -136,7 +136,8 @@ struct Sx23 {
 // array warning.
 struct Sx24 {
   struct S;
-  S a_x [0];                // { dg-message "incomplete type|zero-size array" }
+  S a_x [0];                // { dg-error "5:field .a_x. has incomplete type" }
+// { dg-warning "zero-size array" "" { target *-*-* } .-1 }
 };
 
 struct Sx25 {
@@ -281,15 +282,15 @@ struct S_S_S_x {
 
 struct Anon1 {
   int n;
-  struct {
-    int good[0];            // { dg-warning "zero-size array" }
+  struct {                  // { dg-warning "invalid use \[^\n\r\]* with a zero-size array" }
+    int good[0];            // { dg-warning "forbids zero-size array" }
   };                        // { dg-warning "anonymous struct" }
 };
 
 ASSERT_AT_END (Anon1, good);
 
 struct Anon2 {
-  struct {
+  struct {                  // { dg-warning "invalid use" }
     int n;
     struct {
       int good[0];          // { dg-warning "zero-size array" }
@@ -300,7 +301,7 @@ struct Anon2 {
 ASSERT_AT_END (Anon2, good);
 
 struct Anon3 {
-  struct {
+  struct {                  // { dg-warning "invalid use" }
     struct {
       int n;
       int good[0];          // { dg-warning "zero-size array" }

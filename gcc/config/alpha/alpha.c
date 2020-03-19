@@ -1,5 +1,5 @@
 /* Subroutines used for code generation on the DEC Alpha.
-   Copyright (C) 1992-2016 Free Software Foundation, Inc.
+   Copyright (C) 1992-2019 Free Software Foundation, Inc.
    Contributed by Richard Kenner (kenner@vlsi1.ultra.nyu.edu)
 
 This file is part of GCC.
@@ -19,6 +19,8 @@ along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -26,8 +28,12 @@ along with GCC; see the file COPYING3.  If not see
 #include "target.h"
 #include "rtl.h"
 #include "tree.h"
+#include "stringpool.h"
+#include "attribs.h"
+#include "memmodel.h"
 #include "gimple.h"
 #include "df.h"
+#include "predict.h"
 #include "tm_p.h"
 #include "ssa.h"
 #include "expmed.h"
@@ -61,6 +67,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "params.h"
 #include "builtins.h"
 #include "rtl-iter.h"
+#include "flags.h"
 
 /* This file should be included last.  */
 #include "target-def.h"
@@ -205,7 +212,7 @@ static void alpha_override_options_after_change (void);
 
 #if TARGET_ABI_OPEN_VMS
 static void alpha_write_linkage (FILE *, const char *);
-static bool vms_valid_pointer_mode (machine_mode);
+static bool vms_valid_pointer_mode (scalar_int_mode);
 #else
 #define vms_patch_builtins()  gcc_unreachable()
 #endif
@@ -373,18 +380,6 @@ alpha_option_override (void)
       64, 64, 16*1024 }
   };
 
-  opt_pass *pass_handle_trap_shadows = make_pass_handle_trap_shadows (g);
-  struct register_pass_info handle_trap_shadows_info
-    = { pass_handle_trap_shadows, "eh_ranges",
-	1, PASS_POS_INSERT_AFTER
-      };
-
-  opt_pass *pass_align_insns = make_pass_align_insns (g);
-  struct register_pass_info align_insns_info
-    = { pass_align_insns, "shorten",
-	1, PASS_POS_INSERT_BEFORE
-      };
-
   int const ct_size = ARRAY_SIZE (cpu_table);
   int line_size = 0, l1_size = 0, l2_size = 0;
   int i;
@@ -422,7 +417,8 @@ alpha_option_override (void)
       else if (! strcmp (alpha_tp_string, "i"))
 	alpha_tp = ALPHA_TP_INSN;
       else
-	error ("bad value %qs for -mtrap-precision switch", alpha_tp_string);
+	error ("bad value %qs for %<-mtrap-precision%> switch",
+	       alpha_tp_string);
     }
 
   if (alpha_fprm_string)
@@ -436,7 +432,7 @@ alpha_option_override (void)
       else if (! strcmp (alpha_fprm_string,"d"))
 	alpha_fprm = ALPHA_FPRM_DYN;
       else
-	error ("bad value %qs for -mfp-rounding-mode switch",
+	error ("bad value %qs for %<-mfp-rounding-mode%> switch",
 	       alpha_fprm_string);
     }
 
@@ -451,7 +447,8 @@ alpha_option_override (void)
       else if (strcmp (alpha_fptm_string, "sui") == 0)
 	alpha_fptm = ALPHA_FPTM_SUI;
       else
-	error ("bad value %qs for -mfp-trap-mode switch", alpha_fptm_string);
+	error ("bad value %qs for %<-mfp-trap-mode%> switch",
+	       alpha_fptm_string);
     }
 
   if (alpha_cpu_string)
@@ -468,7 +465,7 @@ alpha_option_override (void)
 	    break;
 	  }
       if (i == ct_size)
-	error ("bad value %qs for -mcpu switch", alpha_cpu_string);
+	error ("bad value %qs for %<-mcpu%> switch", alpha_cpu_string);
     }
 
   if (alpha_tune_string)
@@ -483,7 +480,7 @@ alpha_option_override (void)
 	    break;
 	  }
       if (i == ct_size)
-	error ("bad value %qs for -mtune switch", alpha_tune_string);
+	error ("bad value %qs for %<-mtune%> switch", alpha_tune_string);
     }
 
   if (line_size)
@@ -504,7 +501,7 @@ alpha_option_override (void)
   if ((alpha_fptm == ALPHA_FPTM_SU || alpha_fptm == ALPHA_FPTM_SUI)
       && alpha_tp != ALPHA_TP_INSN && alpha_cpu != PROCESSOR_EV6)
     {
-      warning (0, "fp software completion requires -mtrap-precision=i");
+      warning (0, "fp software completion requires %<-mtrap-precision=i%>");
       alpha_tp = ALPHA_TP_INSN;
     }
 
@@ -572,7 +569,8 @@ alpha_option_override (void)
       }
     else
       {
-	warning (0, "bad value %qs for -mmemory-latency", alpha_mlat_string);
+	warning (0, "bad value %qs for %<-mmemory-latency%>",
+		 alpha_mlat_string);
 	lat = 3;
       }
 
@@ -609,9 +607,6 @@ alpha_option_override (void)
     target_flags |= MASK_LONG_DOUBLE_128;
 #endif
 
-  /* This needs to be done at start up.  It's convenient to do it here.  */
-  register_pass (&handle_trap_shadows_info);
-  register_pass (&align_insns_info);
 }
 
 /* Implement targetm.override_options_after_change.  */
@@ -623,13 +618,13 @@ alpha_override_options_after_change (void)
   /* ??? Kludge these by not doing anything if we don't optimize.  */
   if (optimize > 0)
     {
-      if (align_loops <= 0)
-	align_loops = 16;
-      if (align_jumps <= 0)
-	align_jumps = 16;
+      if (flag_align_loops && !str_align_loops)
+	str_align_loops = "16";
+      if (flag_align_jumps && !str_align_jumps)
+	str_align_jumps = "16";
     }
-  if (align_functions <= 0)
-    align_functions = 16;
+  if (flag_align_functions && !str_align_functions)
+    str_align_functions = "16";
 }
 
 /* Returns 1 if VALUE is a mask that contains full bytes of zero or ones.  */
@@ -702,22 +697,22 @@ resolve_reload_operand (rtx op)
    indicates only DFmode.  */
 
 static bool
-alpha_scalar_mode_supported_p (machine_mode mode)
+alpha_scalar_mode_supported_p (scalar_mode mode)
 {
   switch (mode)
     {
-    case QImode:
-    case HImode:
-    case SImode:
-    case DImode:
-    case TImode: /* via optabs.c */
+    case E_QImode:
+    case E_HImode:
+    case E_SImode:
+    case E_DImode:
+    case E_TImode: /* via optabs.c */
       return true;
 
-    case SFmode:
-    case DFmode:
+    case E_SFmode:
+    case E_DFmode:
       return true;
 
-    case TFmode:
+    case E_TFmode:
       return TARGET_HAS_XFLOATING_LIBS;
 
     default:
@@ -830,7 +825,7 @@ alpha_in_small_data_p (const_tree exp)
 
 #if TARGET_ABI_OPEN_VMS
 static bool
-vms_valid_pointer_mode (machine_mode mode)
+vms_valid_pointer_mode (scalar_int_mode mode)
 {
   return (mode == SImode || mode == DImode);
 }
@@ -1031,7 +1026,8 @@ alpha_legitimize_address_1 (rtx x, rtx scratch, machine_mode mode)
       && GET_MODE_SIZE (mode) <= UNITS_PER_WORD
       && symbolic_operand (x, Pmode))
     {
-      rtx r0, r16, eqv, tga, tp, insn, dest, seq;
+      rtx r0, r16, eqv, tga, tp, dest, seq;
+      rtx_insn *insn;
 
       switch (tls_symbolic_operand_type (x))
 	{
@@ -1039,66 +1035,70 @@ alpha_legitimize_address_1 (rtx x, rtx scratch, machine_mode mode)
 	  break;
 
 	case TLS_MODEL_GLOBAL_DYNAMIC:
-	  start_sequence ();
+	  {
+	    start_sequence ();
 
-	  r0 = gen_rtx_REG (Pmode, 0);
-	  r16 = gen_rtx_REG (Pmode, 16);
-	  tga = get_tls_get_addr ();
-	  dest = gen_reg_rtx (Pmode);
-	  seq = GEN_INT (alpha_next_sequence_number++);
+	    r0 = gen_rtx_REG (Pmode, 0);
+	    r16 = gen_rtx_REG (Pmode, 16);
+	    tga = get_tls_get_addr ();
+	    dest = gen_reg_rtx (Pmode);
+	    seq = GEN_INT (alpha_next_sequence_number++);
 
-	  emit_insn (gen_movdi_er_tlsgd (r16, pic_offset_table_rtx, x, seq));
-	  insn = gen_call_value_osf_tlsgd (r0, tga, seq);
-	  insn = emit_call_insn (insn);
-	  RTL_CONST_CALL_P (insn) = 1;
-	  use_reg (&CALL_INSN_FUNCTION_USAGE (insn), r16);
+	    emit_insn (gen_movdi_er_tlsgd (r16, pic_offset_table_rtx, x, seq));
+	    rtx val = gen_call_value_osf_tlsgd (r0, tga, seq);
+	    insn = emit_call_insn (val);
+	    RTL_CONST_CALL_P (insn) = 1;
+	    use_reg (&CALL_INSN_FUNCTION_USAGE (insn), r16);
 
-          insn = get_insns ();
-	  end_sequence ();
+	    insn = get_insns ();
+	    end_sequence ();
 
-	  emit_libcall_block (insn, dest, r0, x);
-	  return dest;
+	    emit_libcall_block (insn, dest, r0, x);
+	    return dest;
+	  }
 
 	case TLS_MODEL_LOCAL_DYNAMIC:
-	  start_sequence ();
+	  {
+	    start_sequence ();
 
-	  r0 = gen_rtx_REG (Pmode, 0);
-	  r16 = gen_rtx_REG (Pmode, 16);
-	  tga = get_tls_get_addr ();
-	  scratch = gen_reg_rtx (Pmode);
-	  seq = GEN_INT (alpha_next_sequence_number++);
+	    r0 = gen_rtx_REG (Pmode, 0);
+	    r16 = gen_rtx_REG (Pmode, 16);
+	    tga = get_tls_get_addr ();
+	    scratch = gen_reg_rtx (Pmode);
+	    seq = GEN_INT (alpha_next_sequence_number++);
 
-	  emit_insn (gen_movdi_er_tlsldm (r16, pic_offset_table_rtx, seq));
-	  insn = gen_call_value_osf_tlsldm (r0, tga, seq);
-	  insn = emit_call_insn (insn);
-	  RTL_CONST_CALL_P (insn) = 1;
-	  use_reg (&CALL_INSN_FUNCTION_USAGE (insn), r16);
+	    emit_insn (gen_movdi_er_tlsldm (r16, pic_offset_table_rtx, seq));
+	    rtx val = gen_call_value_osf_tlsldm (r0, tga, seq);
+	    insn = emit_call_insn (val);
+	    RTL_CONST_CALL_P (insn) = 1;
+	    use_reg (&CALL_INSN_FUNCTION_USAGE (insn), r16);
 
-          insn = get_insns ();
-	  end_sequence ();
+	    insn = get_insns ();
+	    end_sequence ();
 
-	  eqv = gen_rtx_UNSPEC (Pmode, gen_rtvec (1, const0_rtx),
-				UNSPEC_TLSLDM_CALL);
-	  emit_libcall_block (insn, scratch, r0, eqv);
+	    eqv = gen_rtx_UNSPEC (Pmode, gen_rtvec (1, const0_rtx),
+				  UNSPEC_TLSLDM_CALL);
+	    emit_libcall_block (insn, scratch, r0, eqv);
 
-	  eqv = gen_rtx_UNSPEC (Pmode, gen_rtvec (1, x), UNSPEC_DTPREL);
-	  eqv = gen_rtx_CONST (Pmode, eqv);
+	    eqv = gen_rtx_UNSPEC (Pmode, gen_rtvec (1, x), UNSPEC_DTPREL);
+	    eqv = gen_rtx_CONST (Pmode, eqv);
 
-	  if (alpha_tls_size == 64)
-	    {
-	      dest = gen_reg_rtx (Pmode);
-	      emit_insn (gen_rtx_SET (dest, eqv));
-	      emit_insn (gen_adddi3 (dest, dest, scratch));
-	      return dest;
-	    }
-	  if (alpha_tls_size == 32)
-	    {
-	      insn = gen_rtx_HIGH (Pmode, eqv);
-	      insn = gen_rtx_PLUS (Pmode, scratch, insn);
-	      scratch = gen_reg_rtx (Pmode);
-	      emit_insn (gen_rtx_SET (scratch, insn));
-	    }
-	  return gen_rtx_LO_SUM (Pmode, scratch, eqv);
+	    if (alpha_tls_size == 64)
+	      {
+		dest = gen_reg_rtx (Pmode);
+		emit_insn (gen_rtx_SET (dest, eqv));
+		emit_insn (gen_adddi3 (dest, dest, scratch));
+		return dest;
+	      }
+	    if (alpha_tls_size == 32)
+	      {
+		rtx temp = gen_rtx_HIGH (Pmode, eqv);
+		temp = gen_rtx_PLUS (Pmode, scratch, temp);
+		scratch = gen_reg_rtx (Pmode);
+		emit_insn (gen_rtx_SET (scratch, temp));
+	      }
+	    return gen_rtx_LO_SUM (Pmode, scratch, eqv);
+	  }
 
 	case TLS_MODEL_INITIAL_EXEC:
 	  eqv = gen_rtx_UNSPEC (Pmode, gen_rtvec (1, x), UNSPEC_TPREL);
@@ -1120,10 +1120,10 @@ alpha_legitimize_address_1 (rtx x, rtx scratch, machine_mode mode)
 	  emit_insn (gen_get_thread_pointerdi (tp));
 	  if (alpha_tls_size == 32)
 	    {
-	      insn = gen_rtx_HIGH (Pmode, eqv);
-	      insn = gen_rtx_PLUS (Pmode, tp, insn);
+	      rtx temp = gen_rtx_HIGH (Pmode, eqv);
+	      temp = gen_rtx_PLUS (Pmode, tp, temp);
 	      tp = gen_reg_rtx (Pmode);
-	      emit_insn (gen_rtx_SET (tp, insn));
+	      emit_insn (gen_rtx_SET (tp, temp));
 	    }
 	  return gen_rtx_LO_SUM (Pmode, tp, eqv);
 
@@ -1439,8 +1439,8 @@ alpha_rtx_costs (rtx x, machine_mode mode, int outer_code, int opno, int *total,
     case MINUS:
       if (float_mode_p)
 	*total = cost_data->fp_add;
-      else if (GET_CODE (XEXP (x, 0)) == MULT
-	       && const48_operand (XEXP (XEXP (x, 0), 1), VOIDmode))
+      else if (GET_CODE (XEXP (x, 0)) == ASHIFT
+	       && const23_operand (XEXP (XEXP (x, 0), 1), VOIDmode))
 	{
 	  *total = (rtx_cost (XEXP (XEXP (x, 0), 0), mode,
 			      (enum rtx_code) outer_code, opno, speed)
@@ -1693,6 +1693,35 @@ alpha_secondary_reload (bool in_p, rtx x, reg_class_t rclass_i,
     }
 
   return NO_REGS;
+}
+
+/* Implement TARGET_SECONDARY_MEMORY_NEEDED.
+
+   If we are copying between general and FP registers, we need a memory
+   location unless the FIX extension is available.  */
+
+static bool
+alpha_secondary_memory_needed (machine_mode, reg_class_t class1,
+			       reg_class_t class2)
+{
+  return (!TARGET_FIX
+	  && ((class1 == FLOAT_REGS && class2 != FLOAT_REGS)
+	      || (class2 == FLOAT_REGS && class1 != FLOAT_REGS)));
+}
+
+/* Implement TARGET_SECONDARY_MEMORY_NEEDED_MODE.  If MODE is
+   floating-point, use it.  Otherwise, widen to a word like the default.
+   This is needed because we always store integers in FP registers in
+   quadword format.  This whole area is very tricky!  */
+
+static machine_mode
+alpha_secondary_memory_needed_mode (machine_mode mode)
+{
+  if (GET_MODE_CLASS (mode) == MODE_FLOAT)
+    return mode;
+  if (GET_MODE_SIZE (mode) >= 4)
+    return mode;
+  return mode_for_size (BITS_PER_WORD, GET_MODE_CLASS (mode), 0).require ();
 }
 
 /* Given SEQ, which is an INSN list, look for any MEMs in either
@@ -2789,7 +2818,7 @@ alpha_emit_conditional_move (rtx cmp, machine_mode mode)
       emit_insn (gen_rtx_SET (tem, gen_rtx_fmt_ee (cmp_code, cmp_mode,
 						   op0, op1)));
 
-      cmp_mode = cmp_mode == DImode ? DFmode : DImode;
+      cmp_mode = cmp_mode == DImode ? E_DFmode : E_DImode;
       op0 = gen_lowpart (cmp_mode, tem);
       op1 = CONST0_RTX (cmp_mode);
       cmp = gen_rtx_fmt_ee (code, VOIDmode, op0, op1);
@@ -2887,8 +2916,8 @@ alpha_split_conditional_move (enum rtx_code code, rtx dest, rtx cond,
       || (code == GE || code == GT))
     {
       code = reverse_condition (code);
-      diff = t, t = f, f = diff;
-      diff = t - f;
+      std::swap (t, f);
+      diff = -diff;
     }
 
   subtarget = target = dest;
@@ -2938,8 +2967,8 @@ alpha_split_conditional_move (enum rtx_code code, rtx dest, rtx cond,
 	  add_op = GEN_INT (f);
 	  if (sext_add_operand (add_op, mode))
 	    {
-	      tmp = gen_rtx_MULT (DImode, copy_rtx (subtarget),
-				  GEN_INT (diff));
+	      tmp = gen_rtx_ASHIFT (DImode, copy_rtx (subtarget),
+				    GEN_INT (exact_log2 (diff)));
 	      tmp = gen_rtx_PLUS (DImode, tmp, add_op);
 	      emit_insn (gen_rtx_SET (target, tmp));
 	    }
@@ -3073,7 +3102,7 @@ static void
 alpha_emit_xfloating_libcall (rtx func, rtx target, rtx operands[],
 			      int noperands, rtx equiv)
 {
-  rtx usage = NULL_RTX, tmp, reg;
+  rtx usage = NULL_RTX, reg;
   int regno = 16, i;
 
   start_sequence ();
@@ -3082,20 +3111,20 @@ alpha_emit_xfloating_libcall (rtx func, rtx target, rtx operands[],
     {
       switch (GET_MODE (operands[i]))
 	{
-	case TFmode:
+	case E_TFmode:
 	  reg = gen_rtx_REG (TFmode, regno);
 	  regno += 2;
 	  break;
 
-	case DFmode:
+	case E_DFmode:
 	  reg = gen_rtx_REG (DFmode, regno + 32);
 	  regno += 1;
 	  break;
 
-	case VOIDmode:
+	case E_VOIDmode:
 	  gcc_assert (CONST_INT_P (operands[i]));
 	  /* FALLTHRU */
-	case DImode:
+	case E_DImode:
 	  reg = gen_rtx_REG (DImode, regno);
 	  regno += 1;
 	  break;
@@ -3110,22 +3139,22 @@ alpha_emit_xfloating_libcall (rtx func, rtx target, rtx operands[],
 
   switch (GET_MODE (target))
     {
-    case TFmode:
+    case E_TFmode:
       reg = gen_rtx_REG (TFmode, 16);
       break;
-    case DFmode:
+    case E_DFmode:
       reg = gen_rtx_REG (DFmode, 32);
       break;
-    case DImode:
+    case E_DImode:
       reg = gen_rtx_REG (DImode, 0);
       break;
     default:
       gcc_unreachable ();
     }
 
-  tmp = gen_rtx_MEM (QImode, func);
-  tmp = emit_call_insn (gen_call_value (reg, tmp, const0_rtx,
-					const0_rtx, const0_rtx));
+  rtx mem = gen_rtx_MEM (QImode, func);
+  rtx_insn *tmp = emit_call_insn (gen_call_value (reg, mem, const0_rtx,
+						  const0_rtx, const0_rtx));
   CALL_INSN_FUNCTION_USAGE (tmp) = usage;
   RTL_CONST_CALL_P (tmp) = 1;
 
@@ -4328,12 +4357,9 @@ alpha_expand_builtin_vector_binop (rtx (*gen) (rtx, rtx, rtx),
 static void
 emit_unlikely_jump (rtx cond, rtx label)
 {
-  int very_unlikely = REG_BR_PROB_BASE / 100 - 1;
-  rtx x;
-
-  x = gen_rtx_IF_THEN_ELSE (VOIDmode, cond, label, pc_rtx);
-  x = emit_jump_insn (gen_rtx_SET (pc_rtx, x));
-  add_int_reg_note (x, REG_BR_PROB, very_unlikely);
+  rtx x = gen_rtx_IF_THEN_ELSE (VOIDmode, cond, label, pc_rtx);
+  rtx_insn *insn = emit_jump_insn (gen_rtx_SET (pc_rtx, x));
+  add_reg_br_prob_note (insn, profile_probability::very_unlikely ());
 }
 
 /* A subroutine of the atomic operation splitters.  Emit a load-locked
@@ -4392,16 +4418,16 @@ emit_insxl (machine_mode mode, rtx op1, rtx op2)
 
   switch (mode)
     {
-    case QImode:
+    case E_QImode:
       fn = gen_insbl;
       break;
-    case HImode:
+    case E_HImode:
       fn = gen_inswl;
       break;
-    case SImode:
+    case E_SImode:
       fn = gen_insll;
       break;
-    case DImode:
+    case E_DImode:
       fn = gen_insql;
       break;
     default:
@@ -4758,14 +4784,15 @@ alpha_split_atomic_exchange_12 (rtx operands[])
    a dependency LINK or INSN on DEP_INSN.  COST is the current cost.  */
 
 static int
-alpha_adjust_cost (rtx_insn *insn, rtx link, rtx_insn *dep_insn, int cost)
+alpha_adjust_cost (rtx_insn *insn, int dep_type, rtx_insn *dep_insn, int cost,
+		   unsigned int)
 {
   enum attr_type dep_insn_type;
 
   /* If the dependence is an anti-dependence, there is no cost.  For an
      output dependence, there is sometimes a cost, but it doesn't seem
      worth handling those few cases.  */
-  if (REG_NOTE_KIND (link) != 0)
+  if (dep_type != 0)
     return cost;
 
   /* If we can't recognize the insns, we can't really do anything.  */
@@ -5302,17 +5329,6 @@ alpha_print_operand (FILE *file, rtx x, int code)
       fprintf (file, HOST_WIDE_INT_PRINT_DEC, INTVAL (x) / 8);
       break;
 
-    case 'S':
-      /* Same, except compute (64 - c) / 8 */
-
-      if (!CONST_INT_P (x)
-	  && (unsigned HOST_WIDE_INT) INTVAL (x) >= 64
-	  && (INTVAL (x) & 7) != 8)
-	output_operand_lossage ("invalid %%s value");
-
-      fprintf (file, HOST_WIDE_INT_PRINT_DEC, (64 - INTVAL (x)) / 8);
-      break;
-
     case 'C': case 'D': case 'c': case 'd':
       /* Write out comparison name.  */
       {
@@ -5570,7 +5586,7 @@ alpha_trampoline_init (rtx m_tramp, tree fndecl, rtx chain_value)
       emit_insn (gen_imb ());
 #ifdef HAVE_ENABLE_EXECUTE_STACK
       emit_library_call (init_one_libfunc ("__enable_execute_stack"),
-			 LCT_NORMAL, VOIDmode, 1, XEXP (m_tramp, 0), Pmode);
+			 LCT_NORMAL, VOIDmode, XEXP (m_tramp, 0), Pmode);
 #endif
     }
 }
@@ -5753,8 +5769,29 @@ static bool
 alpha_pass_by_reference (cumulative_args_t ca ATTRIBUTE_UNUSED,
 			 machine_mode mode,
 			 const_tree type ATTRIBUTE_UNUSED,
-			 bool named ATTRIBUTE_UNUSED)
+			 bool named)
 {
+  /* Pass float and _Complex float variable arguments by reference.
+     This avoids 64-bit store from a FP register to a pretend args save area
+     and subsequent 32-bit load from the saved location to a FP register.
+
+     Note that 32-bit loads and stores to/from a FP register on alpha reorder
+     bits to form a canonical 64-bit value in the FP register.  This fact
+     invalidates compiler assumption that 32-bit FP value lives in the lower
+     32-bits of the passed 64-bit FP value, so loading the 32-bit value from
+     the stored 64-bit location using 32-bit FP load is invalid on alpha.
+
+     This introduces sort of ABI incompatibility, but until _Float32 was
+     introduced, C-family languages promoted 32-bit float variable arg to
+     a 64-bit double, and it was not allowed to pass float as a varible
+     argument.  Passing _Complex float as a variable argument never
+     worked on alpha.  Thus, we have no backward compatibility issues
+     to worry about, and passing unpromoted _Float32 and _Complex float
+     as a variable argument will actually work in the future.  */
+
+  if (mode == SFmode || mode == SCmode)
+    return !named;
+
   return mode == TFmode || mode == TCmode;
 }
 
@@ -6047,10 +6084,8 @@ alpha_stdarg_optimize_hook (struct stdarg_info *si, const gimple *stmt)
 	  else if (code2 == COMPONENT_REF
 		   && (code1 == MINUS_EXPR || code1 == PLUS_EXPR))
 	    {
-	      gimple *tem = arg1_stmt;
+	      std::swap (arg1_stmt, arg2_stmt);
 	      code2 = code1;
-	      arg1_stmt = arg2_stmt;
-	      arg2_stmt = tem;
 	    }
 	  else
 	    goto escapes;
@@ -6346,8 +6381,40 @@ alpha_gimplify_va_arg (tree valist, tree type, gimple_seq *pre_p,
   offset = get_initialized_tmp_var (t, pre_p, NULL);
 
   indirect = pass_by_reference (NULL, TYPE_MODE (type), type, false);
+
   if (indirect)
-    type = build_pointer_type_for_mode (type, ptr_mode, true);
+    {
+      if (TREE_CODE (type) == COMPLEX_TYPE
+	  && targetm.calls.split_complex_arg (type))
+	{
+	  tree real_part, imag_part, real_temp;
+
+	  tree ptr_type = build_pointer_type_for_mode (TREE_TYPE (type),
+						       ptr_mode, true);
+
+	  real_part = alpha_gimplify_va_arg_1 (ptr_type, base,
+					       offset, pre_p);
+	  real_part = build_va_arg_indirect_ref (real_part);
+
+	  /* Copy the value into a new temporary, lest the formal temporary
+	     be reused out from under us.  */
+	  real_temp = get_initialized_tmp_var (real_part, pre_p, NULL);
+
+	  imag_part = alpha_gimplify_va_arg_1 (ptr_type, base,
+					       offset, pre_p);
+	  imag_part = build_va_arg_indirect_ref (imag_part);
+
+	  r = build2 (COMPLEX_EXPR, type, real_temp, imag_part);
+
+	  /* Stuff the offset temporary back into its field.  */
+	  gimplify_assign (unshare_expr (offset_field),
+			   fold_convert (TREE_TYPE (offset_field), offset),
+			   pre_p);
+	  return r;
+	}
+      else
+	type = build_pointer_type_for_mode (type, ptr_mode, true);
+    }
 
   /* Find the value.  Note that this will be a stable indirection, or
      a composite of stable indirections in the case of complex.  */
@@ -7476,10 +7543,11 @@ common_object_handler (tree *node, tree name ATTRIBUTE_UNUSED,
 
 static const struct attribute_spec vms_attribute_table[] =
 {
-  /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
-  { COMMON_OBJECT,   0, 1, true,  false, false, common_object_handler, false },
-  { NULL,            0, 0, false, false, false, NULL, false }
+  /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
+       affects_type_identity, handler, exclude } */
+  { COMMON_OBJECT,   0, 1, true,  false, false, false, common_object_handler,
+    NULL },
+  { NULL,            0, 0, false, false, false, false, NULL, NULL }
 };
 
 void
@@ -7729,8 +7797,8 @@ alpha_expand_prologue (void)
      Note that we are only allowed to adjust sp once in the prologue.  */
 
   probed_size = frame_size;
-  if (flag_stack_check)
-    probed_size += STACK_CHECK_PROTECT;
+  if (flag_stack_check || flag_stack_clash_protection)
+    probed_size += get_stack_check_protect ();
 
   if (probed_size <= 32768)
     {
@@ -7739,13 +7807,13 @@ alpha_expand_prologue (void)
 	  int probed;
 
 	  for (probed = 4096; probed < probed_size; probed += 8192)
-	    emit_insn (gen_probe_stack (GEN_INT (-probed)));
+	    emit_insn (gen_stack_probe_internal (GEN_INT (-probed)));
 
 	  /* We only have to do this probe if we aren't saving registers or
 	     if we are probing beyond the frame because of -fstack-check.  */
 	  if ((sa_size == 0 && probed_size > probed - 4096)
-	      || flag_stack_check)
-	    emit_insn (gen_probe_stack (GEN_INT (-probed_size)));
+	      || flag_stack_check || flag_stack_clash_protection)
+	    emit_insn (gen_stack_probe_internal (GEN_INT (-probed_size)));
 	}
 
       if (frame_size != 0)
@@ -7774,7 +7842,8 @@ alpha_expand_prologue (void)
 	 late in the compilation, generate the loop as a single insn.  */
       emit_insn (gen_prologue_stack_probe_loop (count, ptr));
 
-      if ((leftover > 4096 && sa_size == 0) || flag_stack_check)
+      if ((leftover > 4096 && sa_size == 0)
+	  || flag_stack_check || flag_stack_clash_protection)
 	{
 	  rtx last = gen_rtx_MEM (DImode,
 				  plus_constant (Pmode, ptr, -leftover));
@@ -7782,7 +7851,7 @@ alpha_expand_prologue (void)
 	  emit_move_insn (last, const0_rtx);
 	}
 
-      if (flag_stack_check)
+      if (flag_stack_check || flag_stack_clash_protection)
 	{
 	  /* If -fstack-check is specified we have to load the entire
 	     constant into a register and subtract from the sp in one go,
@@ -8770,6 +8839,9 @@ alpha_handle_trap_shadows (void)
 		    case CODE_LABEL:
 		      goto close_shadow;
 
+		    case DEBUG_INSN:
+		      break;
+
 		    default:
 		      gcc_unreachable ();
 		    }
@@ -9235,10 +9307,11 @@ alpha_align_insns_1 (unsigned int max_align,
   /* Let shorten branches care for assigning alignments to code labels.  */
   shorten_branches (get_insns ());
 
-  if (align_functions < 4)
+  unsigned int option_alignment = align_functions.levels[0].get_value ();
+  if (option_alignment < 4)
     align = 4;
-  else if ((unsigned int) align_functions < max_align)
-    align = align_functions;
+  else if ((unsigned int) option_alignment < max_align)
+    align = option_alignment;
   else
     align = max_align;
 
@@ -9256,7 +9329,8 @@ alpha_align_insns_1 (unsigned int max_align,
       /* When we see a label, resync alignment etc.  */
       if (LABEL_P (i))
 	{
-	  unsigned int new_align = 1 << label_to_alignment (i);
+	  unsigned int new_align
+	    = label_to_alignment (i).levels[0].get_value ();
 
 	  if (new_align >= align)
 	    {
@@ -9373,14 +9447,6 @@ alpha_pad_function_end (void)
 	       || find_reg_note (insn, REG_NORETURN, NULL_RTX)))
         continue;
 
-      /* Make sure we do not split a call and its corresponding
-	 CALL_ARG_LOCATION note.  */
-      next = NEXT_INSN (insn);
-      if (next == NULL)
-	continue;
-      if (NOTE_P (next) && NOTE_KIND (next) == NOTE_INSN_CALL_ARG_LOCATION)
-	insn = next;
-
       next = next_active_insn (insn);
       if (next)
 	{
@@ -9445,6 +9511,25 @@ And in the noreturn case:
 
   if (current_function_has_exception_handlers ())
     alpha_pad_function_end ();
+
+  /* CALL_PAL that implements trap insn, updates program counter to point
+     after the insn.  In case trap is the last insn in the function,
+     emit NOP to guarantee that PC remains inside function boundaries.
+     This workaround is needed to get reliable backtraces.  */
+  
+  rtx_insn *insn = prev_active_insn (get_last_insn ());
+
+  if (insn && NONJUMP_INSN_P (insn))
+    {
+      rtx pat = PATTERN (insn);
+      if (GET_CODE (pat) == PARALLEL)
+	{
+	  rtx vec = XVECEXP (pat, 0, 0);
+	  if (GET_CODE (vec) == TRAP_IF
+	      && XEXP (vec, 0) == const1_rtx)
+	    emit_insn_after (gen_unop (), insn);
+	}
+    }
 }
 
 static void
@@ -9542,9 +9627,9 @@ alpha_arg_type (machine_mode mode)
 {
   switch (mode)
     {
-    case SFmode:
+    case E_SFmode:
       return TARGET_FLOAT_VAX ? FF : FS;
-    case DFmode:
+    case E_DFmode:
       return TARGET_FLOAT_VAX ? FD : FT;
     default:
       return I64;
@@ -9752,8 +9837,6 @@ alpha_init_libfuncs (void)
       set_optab_libfunc (smod_optab, DImode, "OTS$REM_L");
       set_optab_libfunc (umod_optab, SImode, "OTS$REM_UI");
       set_optab_libfunc (umod_optab, DImode, "OTS$REM_UL");
-      abort_libfunc = init_one_libfunc ("decc$abort");
-      memcmp_libfunc = init_one_libfunc ("decc$memcmp");
 #ifdef MEM_LIBFUNCS_INIT
       MEM_LIBFUNCS_INIT;
 #endif
@@ -9782,9 +9865,7 @@ alpha_canonicalize_comparison (int *code, rtx *op0, rtx *op1,
       && (*code == GE || *code == GT || *code == GEU || *code == GTU)
       && (REG_P (*op1) || *op1 == const0_rtx))
     {
-      rtx tem = *op0;
-      *op0 = *op1;
-      *op1 = tem;
+      std::swap (*op0, *op1);
       *code = (int)swap_condition ((enum rtx_code)*code);
     }
 
@@ -9860,6 +9941,43 @@ alpha_atomic_assign_expand_fenv (tree *hold, tree *clear, tree *update)
   *update = build2 (COMPOUND_EXPR, void_type_node,
 		    build2 (COMPOUND_EXPR, void_type_node,
 			    reload_fenv, restore_fnenv), update_call);
+}
+
+/* Implement TARGET_HARD_REGNO_MODE_OK.  On Alpha, the integer registers
+   can hold any mode.  The floating-point registers can hold 64-bit
+   integers as well, but not smaller values.  */
+
+static bool
+alpha_hard_regno_mode_ok (unsigned int regno, machine_mode mode)
+{
+  if (IN_RANGE (regno, 32, 62))
+    return (mode == SFmode
+	    || mode == DFmode
+	    || mode == DImode
+	    || mode == SCmode
+	    || mode == DCmode);
+  return true;
+}
+
+/* Implement TARGET_MODES_TIEABLE_P.  This asymmetric test is true when
+   MODE1 could be put in an FP register but MODE2 could not.  */
+
+static bool
+alpha_modes_tieable_p (machine_mode mode1, machine_mode mode2)
+{
+  return (alpha_hard_regno_mode_ok (32, mode1)
+	  ? alpha_hard_regno_mode_ok (32, mode2)
+	  : true);
+}
+
+/* Implement TARGET_CAN_CHANGE_MODE_CLASS.  */
+
+static bool
+alpha_can_change_mode_class (machine_mode from, machine_mode to,
+			     reg_class_t rclass)
+{
+  return (GET_MODE_SIZE (from) == GET_MODE_SIZE (to)
+	  || !reg_classes_intersect_p (FLOAT_REGS, rclass));
 }
 
 /* Initialize the GCC target structure.  */
@@ -10016,6 +10134,10 @@ alpha_atomic_assign_expand_fenv (tree *hold, tree *clear, tree *update)
 
 #undef TARGET_SECONDARY_RELOAD
 #define TARGET_SECONDARY_RELOAD alpha_secondary_reload
+#undef TARGET_SECONDARY_MEMORY_NEEDED
+#define TARGET_SECONDARY_MEMORY_NEEDED alpha_secondary_memory_needed
+#undef TARGET_SECONDARY_MEMORY_NEEDED_MODE
+#define TARGET_SECONDARY_MEMORY_NEEDED_MODE alpha_secondary_memory_needed_mode
 
 #undef TARGET_SCALAR_MODE_SUPPORTED_P
 #define TARGET_SCALAR_MODE_SUPPORTED_P alpha_scalar_mode_supported_p
@@ -10040,6 +10162,9 @@ alpha_atomic_assign_expand_fenv (tree *hold, tree *clear, tree *update)
 #define TARGET_MANGLE_TYPE alpha_mangle_type
 #endif
 
+#undef TARGET_LRA_P
+#define TARGET_LRA_P hook_bool_void_false
+
 #undef TARGET_LEGITIMATE_ADDRESS_P
 #define TARGET_LEGITIMATE_ADDRESS_P alpha_legitimate_address_p
 
@@ -10051,6 +10176,15 @@ alpha_atomic_assign_expand_fenv (tree *hold, tree *clear, tree *update)
 
 #undef TARGET_ATOMIC_ASSIGN_EXPAND_FENV
 #define TARGET_ATOMIC_ASSIGN_EXPAND_FENV alpha_atomic_assign_expand_fenv
+
+#undef TARGET_HARD_REGNO_MODE_OK
+#define TARGET_HARD_REGNO_MODE_OK alpha_hard_regno_mode_ok
+
+#undef TARGET_MODES_TIEABLE_P
+#define TARGET_MODES_TIEABLE_P alpha_modes_tieable_p
+
+#undef TARGET_CAN_CHANGE_MODE_CLASS
+#define TARGET_CAN_CHANGE_MODE_CLASS alpha_can_change_mode_class
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

@@ -1,9 +1,8 @@
-/* This code uses nvptx inline assembly guarded with acc_on_device, which is
-   not optimized away at -O0, and then confuses the target assembler.
-   { dg-skip-if "" { *-*-* } { "-O0" } { "" } } */
+/* { dg-additional-options "-fopenacc-dim=32" } */
 
 #include <stdio.h>
 #include <openacc.h>
+#include <gomp-constants.h>
 
 int check (const int *ary, int size, int gp, int wp, int vp)
 {
@@ -77,15 +76,12 @@ static int __attribute__((noinline)) place ()
 {
   int r = 0;
 
-  if (acc_on_device (acc_device_nvidia))
-    {
-      int g = 0, w = 0, v = 0;
+  int g = 0, w = 0, v = 0;
+  g = __builtin_goacc_parlevel_id (GOMP_DIM_GANG);
+  w = __builtin_goacc_parlevel_id (GOMP_DIM_WORKER);
+  v = __builtin_goacc_parlevel_id (GOMP_DIM_VECTOR);
+  r = (g << 16) | (w << 8) | v;
 
-      __asm__ volatile ("mov.u32 %0,%%ctaid.x;" : "=r" (g));
-      __asm__ volatile ("mov.u32 %0,%%tid.y;" : "=r" (w));
-      __asm__ volatile ("mov.u32 %0,%%tid.x;" : "=r" (v));
-      r = (g << 16) | (w << 8) | v;
-    }
   return r;
 }
 
@@ -103,12 +99,14 @@ int vector_1 (int *ary, int size)
   
 #pragma acc parallel num_workers (32) vector_length(32) copy(ary[0:size]) firstprivate (size)
   {
+#pragma acc loop gang
+    for (int jx = 0; jx < 1; jx++)
 #pragma acc loop auto
-    for (int ix = 0; ix < size; ix++)
-      ary[ix] = place ();
+      for (int ix = 0; ix < size; ix++)
+	ary[ix] = place ();
   }
 
-  return check (ary, size, 0, 0, 1);
+  return check (ary, size, 0, 1, 1);
 }
 
 int vector_2 (int *ary, int size)
@@ -118,7 +116,7 @@ int vector_2 (int *ary, int size)
 #pragma acc parallel num_workers (32) vector_length(32) copy(ary[0:size]) firstprivate (size)
   {
 #pragma acc loop worker
-    for (int jx = 0; jx <  size  / 64; jx++)
+    for (int jx = 0; jx < size  / 64; jx++)
 #pragma acc loop auto
       for (int ix = 0; ix < 64; ix++)
 	ary[ix + jx * 64] = place ();
@@ -133,30 +131,16 @@ int worker_1 (int *ary, int size)
   
 #pragma acc parallel num_workers (32) vector_length(32) copy(ary[0:size]) firstprivate (size)
   {
+#pragma acc loop gang
+    for (int kx = 0; kx < 1; kx++)
 #pragma acc loop auto
-    for (int jx = 0; jx <  size  / 64; jx++)
+      for (int jx = 0; jx <  size  / 64; jx++)
 #pragma acc loop vector
-      for (int ix = 0; ix < 64; ix++)
-	ary[ix + jx * 64] = place ();
+	for (int ix = 0; ix < 64; ix++)
+	  ary[ix + jx * 64] = place ();
   }
 
-  return check (ary, size, 0, 1, 1);
-}
-
-int worker_2 (int *ary, int size)
-{
-  clear (ary, size);
-  
-#pragma acc parallel num_workers (32) vector_length(32) copy(ary[0:size]) firstprivate (size)
-  {
-#pragma acc loop auto
-    for (int jx = 0; jx <  size  / 64; jx++)
-#pragma acc loop auto
-      for (int ix = 0; ix < 64; ix++)
-	ary[ix + jx * 64] = place ();
-  }
-
-  return check (ary, size, 0, 1, 1);
+  return check (ary, size, 0,  1, 1);
 }
 
 int gang_1 (int *ary, int size)
@@ -193,7 +177,37 @@ int gang_2 (int *ary, int size)
   return check (ary, size, 1, 1, 1);
 }
 
-#define N (32*32*32)
+int gang_3 (int *ary, int size)
+{
+  clear (ary, size);
+  
+#pragma acc parallel num_workers (32) vector_length(32) copy(ary[0:size]) firstprivate (size)
+  {
+#pragma acc loop auto
+    for (int jx = 0; jx <  size  / 64; jx++)
+#pragma acc loop auto
+      for (int ix = 0; ix < 64; ix++)
+	ary[ix + jx * 64] = place ();
+  }
+
+  return check (ary, size, 1, 1, 1);
+}
+
+int gang_4 (int *ary, int size)
+{
+  clear (ary, size);
+  
+#pragma acc parallel vector_length(32) copy(ary[0:size]) firstprivate (size)
+  {
+#pragma acc loop auto
+    for (int jx = 0; jx <  size; jx++)
+      ary[jx] = place ();
+  }
+
+  return check (ary, size, 1, 0, 1);
+}
+
+#define N (32*32*32*2)
 int main ()
 {
   int ondev = 0;
@@ -214,12 +228,14 @@ int main ()
 
   if (worker_1 (ary,  N))
     return 1;
-  if (worker_2 (ary,  N))
-    return 1;
   
   if (gang_1 (ary,  N))
     return 1;
   if (gang_2 (ary,  N))
+    return 1;
+  if (gang_3 (ary,  N))
+    return 1;
+  if (gang_4 (ary,  N))
     return 1;
 
   return 0;

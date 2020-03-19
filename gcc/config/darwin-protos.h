@@ -1,5 +1,5 @@
 /* Prototypes.
-   Copyright (C) 2001-2016 Free Software Foundation, Inc.
+   Copyright (C) 2001-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -53,8 +53,6 @@ extern void darwin_set_default_type_attributes (tree);
 
 #endif /* TREE_CODE */
 
-extern void machopic_finish (FILE *);
-
 extern int machopic_reloc_rw_mask (void);
 extern section *machopic_select_section (tree, int, unsigned HOST_WIDE_INT);
 
@@ -91,9 +89,9 @@ extern void darwin_globalize_label (FILE *, const char *);
 extern void darwin_assemble_visibility (tree, int);
 
 extern void darwin_asm_output_dwarf_delta (FILE *, int, const char *,
-					   const char *);
+					   const char *, HOST_WIDE_INT);
 extern void darwin_asm_output_dwarf_offset (FILE *, int, const char *,
-					    section *);
+					    HOST_WIDE_INT, section *);
 
 extern void darwin_asm_declare_object_name (FILE *, const char *, tree);
 extern void darwin_asm_declare_constant_name (FILE *, const char *,

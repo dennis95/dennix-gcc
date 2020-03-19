@@ -1,5 +1,5 @@
 /* go-lang.c -- Go frontend gcc interface.
-   Copyright (C) 2009-2016 Free Software Foundation, Inc.
+   Copyright (C) 2009-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -37,6 +37,11 @@ along with GCC; see the file COPYING3.  If not see
 #include <mpfr.h>
 
 #include "go-c.h"
+#include "go-gcc.h"
+
+#ifndef TARGET_AIX
+#define TARGET_AIX 0
+#endif
 
 /* Language-dependent contents of a type.  */
 
@@ -83,6 +88,7 @@ struct GTY(()) language_function
 static const char *go_pkgpath = NULL;
 static const char *go_prefix = NULL;
 static const char *go_relative_import_path = NULL;
+static const char *go_c_header = NULL;
 
 /* Language hooks.  */
 
@@ -99,9 +105,22 @@ go_langhook_init (void)
      to, e.g., unsigned_char_type_node) but before calling
      build_common_builtin_nodes (because it calls, indirectly,
      go_type_for_size).  */
-  go_create_gogo (INT_TYPE_SIZE, POINTER_SIZE, go_pkgpath, go_prefix,
-		  go_relative_import_path, go_check_divide_zero,
-		  go_check_divide_overflow);
+  struct go_create_gogo_args args;
+  args.int_type_size = INT_TYPE_SIZE;
+  args.pointer_size = POINTER_SIZE;
+  args.pkgpath = go_pkgpath;
+  args.prefix = go_prefix;
+  args.relative_import_path = go_relative_import_path;
+  args.c_header = go_c_header;
+  args.check_divide_by_zero = go_check_divide_zero;
+  args.check_divide_overflow = go_check_divide_overflow;
+  args.compiling_runtime = go_compiling_runtime;
+  args.debug_escape_level = go_debug_escape_level;
+  args.debug_escape_hash = go_debug_escape_hash;
+  args.nil_check_size_threshold = TARGET_AIX ? -1 : 4096;
+  args.linemap = go_get_linemap();
+  args.backend = go_get_backend();
+  go_create_gogo (&args);
 
   build_common_builtin_nodes ();
 
@@ -175,7 +194,7 @@ static bool
 go_langhook_handle_option (
     size_t scode,
     const char *arg,
-    int value ATTRIBUTE_UNUSED,
+    HOST_WIDE_INT value,
     int kind ATTRIBUTE_UNUSED,
     location_t loc ATTRIBUTE_UNUSED,
     const struct cl_option_handlers *handlers ATTRIBUTE_UNUSED)
@@ -232,7 +251,7 @@ go_langhook_handle_option (
       break;
 
     case OPT_fgo_optimize_:
-      ret = go_enable_optimize (arg) ? true : false;
+      ret = go_enable_optimize (arg, value) ? true : false;
       break;
 
     case OPT_fgo_pkgpath_:
@@ -245,6 +264,10 @@ go_langhook_handle_option (
 
     case OPT_fgo_relative_import_path_:
       go_relative_import_path = arg;
+      break;
+
+    case OPT_fgo_c_header_:
+      go_c_header = arg;
       break;
 
     default:
@@ -286,6 +309,15 @@ go_langhook_post_options (const char **pfilename ATTRIBUTE_UNUSED)
   if (!global_options_set.x_flag_split_stack
       && targetm_common.supports_split_stack (false, &global_options))
     global_options.x_flag_split_stack = 1;
+
+  /* If stack splitting is turned on, and the user did not explicitly
+     request function partitioning, turn off partitioning, as it
+     confuses the linker when trying to handle partitioned split-stack
+     code that calls a non-split-stack function.  */
+  if (global_options.x_flag_split_stack
+      && global_options.x_flag_reorder_blocks_and_partition
+      && !global_options_set.x_flag_reorder_blocks_and_partition)
+    global_options.x_flag_reorder_blocks_and_partition = 0;
 
   /* Returning false means that the backend should be used.  */
   return false;
@@ -346,7 +378,16 @@ go_langhook_type_for_mode (machine_mode mode, int unsignedp)
      make sense for the middle-end to ask the frontend for a type
      which the frontend does not support.  However, at least for now
      it is required.  See PR 46805.  */
-  if (VECTOR_MODE_P (mode))
+  if (GET_MODE_CLASS (mode) == MODE_VECTOR_BOOL
+      && valid_vector_subparts_p (GET_MODE_NUNITS (mode)))
+    {
+      unsigned int elem_bits = vector_element_size (GET_MODE_BITSIZE (mode),
+						    GET_MODE_NUNITS (mode));
+      tree bool_type = build_nonstandard_boolean_type (elem_bits);
+      return build_vector_type_for_mode (bool_type, mode);
+    }
+  else if (VECTOR_MODE_P (mode)
+	   && valid_vector_subparts_p (GET_MODE_NUNITS (mode)))
     {
       tree inner;
 
@@ -356,13 +397,14 @@ go_langhook_type_for_mode (machine_mode mode, int unsignedp)
       return NULL_TREE;
     }
 
-  // FIXME: This static_cast should be in machmode.h.
-  enum mode_class mc = static_cast<enum mode_class>(GET_MODE_CLASS(mode));
-  if (mc == MODE_INT)
-    return go_langhook_type_for_size(GET_MODE_BITSIZE(mode), unsignedp);
-  else if (mc == MODE_FLOAT)
+  scalar_int_mode imode;
+  scalar_float_mode fmode;
+  complex_mode cmode;
+  if (is_int_mode (mode, &imode))
+    return go_langhook_type_for_size (GET_MODE_BITSIZE (imode), unsignedp);
+  else if (is_float_mode (mode, &fmode))
     {
-      switch (GET_MODE_BITSIZE (mode))
+      switch (GET_MODE_BITSIZE (fmode))
 	{
 	case 32:
 	  return float_type_node;
@@ -371,13 +413,13 @@ go_langhook_type_for_mode (machine_mode mode, int unsignedp)
 	default:
 	  // We have to check for long double in order to support
 	  // i386 excess precision.
-	  if (mode == TYPE_MODE(long_double_type_node))
+	  if (fmode == TYPE_MODE(long_double_type_node))
 	    return long_double_type_node;
 	}
     }
-  else if (mc == MODE_COMPLEX_FLOAT)
+  else if (is_complex_float_mode (mode, &cmode))
     {
-      switch (GET_MODE_BITSIZE (mode))
+      switch (GET_MODE_BITSIZE (cmode))
 	{
 	case 64:
 	  return complex_float_type_node;
@@ -386,7 +428,7 @@ go_langhook_type_for_mode (machine_mode mode, int unsignedp)
 	default:
 	  // We have to check for long double in order to support
 	  // i386 excess precision.
-	  if (mode == TYPE_MODE(complex_long_double_type_node))
+	  if (cmode == TYPE_MODE(complex_long_double_type_node))
 	    return complex_long_double_type_node;
 	}
     }
