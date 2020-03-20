@@ -1,5 +1,5 @@
 /* RTL-based forward propagation pass for GNU compiler.
-   Copyright (C) 2005-2016 Free Software Foundation, Inc.
+   Copyright (C) 2005-2019 Free Software Foundation, Inc.
    Contributed by Paolo Bonzini and Steven Bosscher.
 
 This file is part of GCC.
@@ -26,6 +26,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "rtl.h"
 #include "predict.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "insn-config.h"
 #include "emit-rtl.h"
@@ -118,6 +119,13 @@ static int num_changes;
 static vec<df_ref> use_def_ref;
 static vec<df_ref> reg_defs;
 static vec<df_ref> reg_defs_stack;
+
+/* The maximum number of propagations that are still allowed.  If we do
+   more propagations than originally we had uses, we must have ended up
+   in a propagation loop, as in PR79405.  Until the algorithm fwprop
+   uses can obviously not get into such loops we need a workaround like
+   this.  */
+static int propagations_left;
 
 /* The MD bitmaps are trimmed to include only live registers to cut
    memory usage on testcases like insn-recog.c.  Track live registers
@@ -349,12 +357,12 @@ canonicalize_address (rtx x)
       {
       case ASHIFT:
         if (CONST_INT_P (XEXP (x, 1))
-            && INTVAL (XEXP (x, 1)) < GET_MODE_BITSIZE (GET_MODE (x))
-            && INTVAL (XEXP (x, 1)) >= 0)
+	    && INTVAL (XEXP (x, 1)) < GET_MODE_UNIT_BITSIZE (GET_MODE (x))
+	    && INTVAL (XEXP (x, 1)) >= 0)
 	  {
 	    HOST_WIDE_INT shift = INTVAL (XEXP (x, 1));
 	    PUT_CODE (x, MULT);
-	    XEXP (x, 1) = gen_int_mode ((HOST_WIDE_INT) 1 << shift,
+	    XEXP (x, 1) = gen_int_mode (HOST_WIDE_INT_1 << shift,
 					GET_MODE (x));
 	  }
 
@@ -619,6 +627,15 @@ propagate_rtx_1 (rtx *px, rtx old_rtx, rtx new_rtx, int flags)
 
   *px = tem;
 
+  /* Allow replacements that simplify operations on a vector or complex
+     value to a component.  The most prominent case is
+     (subreg ([vec_]concat ...)).   */
+  if (REG_P (tem) && !HARD_REGISTER_P (tem)
+      && (VECTOR_MODE_P (GET_MODE (new_rtx))
+	  || COMPLEX_MODE_P (GET_MODE (new_rtx)))
+      && GET_MODE (tem) == GET_MODE_INNER (GET_MODE (new_rtx)))
+    return true;
+
   /* The replacement we made so far is valid, if all of the recursive
      replacements were valid, or we could simplify everything to
      a constant.  */
@@ -663,8 +680,7 @@ propagate_rtx (rtx x, machine_mode mode, rtx old_rtx, rtx new_rtx,
       || CONSTANT_P (new_rtx)
       || (GET_CODE (new_rtx) == SUBREG
 	  && REG_P (SUBREG_REG (new_rtx))
-	  && (GET_MODE_SIZE (mode)
-	      <= GET_MODE_SIZE (GET_MODE (SUBREG_REG (new_rtx))))))
+	  && !paradoxical_subreg_p (mode, GET_MODE (SUBREG_REG (new_rtx)))))
     flags |= PR_CAN_APPEAR;
   if (!varying_mem_p (new_rtx))
     flags |= PR_HANDLE_MEM;
@@ -715,14 +731,15 @@ local_ref_killed_between_p (df_ref ref, rtx_insn *from, rtx_insn *to)
 }
 
 
-/* Check if the given DEF is available in INSN.  This would require full
-   computation of available expressions; we check only restricted conditions:
-   - if DEF is the sole definition of its register, go ahead;
-   - in the same basic block, we check for no definitions killing the
-     definition of DEF_INSN;
-   - if USE's basic block has DEF's basic block as the sole predecessor,
-     we check if the definition is killed after DEF_INSN or before
+/* Check if USE is killed between DEF_INSN and TARGET_INSN.  This would
+   require full computation of available expressions; we check only a few
+   restricted conditions:
+   - if the reg in USE has only one definition, go ahead;
+   - in the same basic block, we check for no definitions killing the use;
+   - if TARGET_INSN's basic block has DEF_INSN's basic block as its sole
+     predecessor, we check if the use is killed after DEF_INSN or before
      TARGET_INSN insn, in their respective basic blocks.  */
+
 static bool
 use_killed_between (df_ref use, rtx_insn *def_insn, rtx_insn *target_insn)
 {
@@ -746,12 +763,17 @@ use_killed_between (df_ref use, rtx_insn *def_insn, rtx_insn *target_insn)
      know that this definition reaches use, or we wouldn't be here.
      However, this is invalid for hard registers because if they are
      live at the beginning of the function it does not mean that we
-     have an uninitialized access.  */
+     have an uninitialized access.  And we have to check for the case
+     where a register may be used uninitialized in a loop as above.  */
   regno = DF_REF_REGNO (use);
   def = DF_REG_DEF_CHAIN (regno);
   if (def
       && DF_REF_NEXT_REG (def) == NULL
-      && regno >= FIRST_PSEUDO_REGISTER)
+      && regno >= FIRST_PSEUDO_REGISTER
+      && (BLOCK_FOR_INSN (DF_REF_INSN (def)) == def_bb
+	  ? DF_INSN_LUID (DF_REF_INSN (def)) < DF_INSN_LUID (def_insn)
+	  : dominated_by_p (CDI_DOMINATORS,
+			    def_bb, BLOCK_FOR_INSN (DF_REF_INSN (def)))))
     return false;
 
   /* Check locally if we are in the same basic block.  */
@@ -1041,9 +1063,7 @@ free_load_extend (rtx src, rtx_insn *insn)
   df_ref def, use;
 
   reg = XEXP (src, 0);
-#ifdef LOAD_EXTEND_OP
-  if (LOAD_EXTEND_OP (GET_MODE (reg)) != GET_CODE (src))
-#endif
+  if (load_extend_op (GET_MODE (reg)) != GET_CODE (src))
     return false;
 
   FOR_EACH_INSN_USE (use, insn)
@@ -1081,6 +1101,7 @@ forward_propagate_subreg (df_ref use, rtx_insn *def_insn, rtx def_set)
   rtx use_reg = DF_REF_REG (use);
   rtx_insn *use_insn;
   rtx src;
+  scalar_int_mode int_use_mode, src_mode;
 
   /* Only consider subregs... */
   machine_mode use_mode = GET_MODE (use_reg);
@@ -1088,9 +1109,7 @@ forward_propagate_subreg (df_ref use, rtx_insn *def_insn, rtx def_set)
       || !REG_P (SET_DEST (def_set)))
     return false;
 
-  /* If this is a paradoxical SUBREG...  */
-  if (GET_MODE_SIZE (use_mode)
-      > GET_MODE_SIZE (GET_MODE (SUBREG_REG (use_reg))))
+  if (paradoxical_subreg_p (use_reg))
     {
       /* If this is a paradoxical SUBREG, we have no idea what value the
 	 extra bits would have.  However, if the operand is equivalent to
@@ -1124,17 +1143,19 @@ forward_propagate_subreg (df_ref use, rtx_insn *def_insn, rtx def_set)
      definition of Y or, failing that, allow A to be deleted after
      reload through register tying.  Introducing more uses of Y
      prevents both optimisations.  */
-  else if (subreg_lowpart_p (use_reg))
+  else if (is_a <scalar_int_mode> (use_mode, &int_use_mode)
+	   && subreg_lowpart_p (use_reg))
     {
       use_insn = DF_REF_INSN (use);
       src = SET_SRC (def_set);
       if ((GET_CODE (src) == ZERO_EXTEND
 	   || GET_CODE (src) == SIGN_EXTEND)
+	  && is_a <scalar_int_mode> (GET_MODE (src), &src_mode)
 	  && REG_P (XEXP (src, 0))
 	  && REGNO (XEXP (src, 0)) >= FIRST_PSEUDO_REGISTER
 	  && GET_MODE (XEXP (src, 0)) == use_mode
 	  && !free_load_extend (src, def_insn)
-	  && (targetm.mode_rep_extended (use_mode, GET_MODE (src))
+	  && (targetm.mode_rep_extended (int_use_mode, src_mode)
 	      != (int) GET_CODE (src))
 	  && all_uses_available_at (def_insn, use_insn))
 	return try_fwprop_subst (use, DF_REF_LOC (use), XEXP (src, 0),
@@ -1248,7 +1269,7 @@ forward_propagate_and_simplify (df_ref use, rtx_insn *def_insn, rtx def_set)
   reg = DF_REF_REG (use);
   if (GET_CODE (reg) == SUBREG && GET_CODE (SET_DEST (def_set)) == SUBREG)
     {
-      if (SUBREG_BYTE (SET_DEST (def_set)) != SUBREG_BYTE (reg))
+      if (maybe_ne (SUBREG_BYTE (SET_DEST (def_set)), SUBREG_BYTE (reg)))
 	return false;
     }
   /* Check if the def had a subreg, but the use has the whole reg.  */
@@ -1399,6 +1420,8 @@ forward_propagate_into (df_ref use)
   if (forward_propagate_and_simplify (use, def_insn, def_set)
       || forward_propagate_subreg (use, def_insn, def_set))
     {
+      propagations_left--;
+
       if (cfun->can_throw_non_call_exceptions
 	  && find_reg_note (use_insn, REG_EH_REGION, NULL_RTX)
 	  && purge_dead_edges (DF_REF_BB (use)))
@@ -1426,6 +1449,8 @@ fwprop_init (void)
   active_defs = XNEWVEC (df_ref, max_reg_num ());
   if (flag_checking)
     active_defs_check = sparseset_alloc (max_reg_num ());
+
+  propagations_left = DF_USES_TABLE_SIZE ();
 }
 
 static void
@@ -1461,7 +1486,6 @@ static unsigned int
 fwprop (void)
 {
   unsigned i;
-  bool need_cleanup = false;
 
   fwprop_init ();
 
@@ -1473,18 +1497,19 @@ fwprop (void)
 
   for (i = 0; i < DF_USES_TABLE_SIZE (); i++)
     {
+      if (!propagations_left)
+	break;
+
       df_ref use = DF_USES_GET (i);
       if (use)
 	if (DF_REF_TYPE (use) == DF_REF_REG_USE
 	    || DF_REF_BB (use)->loop_father == NULL
 	    /* The outer most loop is not really a loop.  */
 	    || loop_outer (DF_REF_BB (use)->loop_father) == NULL)
-	  need_cleanup |= forward_propagate_into (use);
+	  forward_propagate_into (use);
     }
 
   fwprop_done ();
-  if (need_cleanup)
-    cleanup_cfg (0);
   return 0;
 }
 
@@ -1528,7 +1553,6 @@ static unsigned int
 fwprop_addr (void)
 {
   unsigned i;
-  bool need_cleanup = false;
 
   fwprop_init ();
 
@@ -1536,19 +1560,19 @@ fwprop_addr (void)
      end, and we'll go through them as well.  */
   for (i = 0; i < DF_USES_TABLE_SIZE (); i++)
     {
+      if (!propagations_left)
+	break;
+
       df_ref use = DF_USES_GET (i);
       if (use)
 	if (DF_REF_TYPE (use) != DF_REF_REG_USE
 	    && DF_REF_BB (use)->loop_father != NULL
 	    /* The outer most loop is not really a loop.  */
 	    && loop_outer (DF_REF_BB (use)->loop_father) != NULL)
-	  need_cleanup |= forward_propagate_into (use);
+	  forward_propagate_into (use);
     }
 
   fwprop_done ();
-
-  if (need_cleanup)
-    cleanup_cfg (0);
   return 0;
 }
 

@@ -1,5 +1,5 @@
 /* Dwarf2 Call Frame Information helper routines.
-   Copyright (C) 1992-2016 Free Software Foundation, Inc.
+   Copyright (C) 1992-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -25,6 +25,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "rtl.h"
 #include "tree.h"
 #include "tree-pass.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "emit-rtl.h"
 #include "stor-layout.h"
@@ -34,6 +35,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "common/common-target.h"
 
 #include "except.h"		/* expand_builtin_dwarf_sp_column */
+#include "profile-count.h"	/* For expr.h */
 #include "expr.h"		/* init_return_column_size */
 #include "output.h"		/* asm_out_file */
 #include "debug.h"		/* dwarf2out_do_frame, dwarf2out_do_cfi_asm */
@@ -51,8 +53,9 @@ along with GCC; see the file COPYING3.  If not see
 #define INCOMING_RETURN_ADDR_RTX  (gcc_unreachable (), NULL_RTX)
 #endif
 
-/* Maximum size (in bytes) of an artificially generated label.  */
-#define MAX_ARTIFICIAL_LABEL_BYTES	30
+#ifndef DEFAULT_INCOMING_FRAME_SP_OFFSET
+#define DEFAULT_INCOMING_FRAME_SP_OFFSET INCOMING_FRAME_SP_OFFSET
+#endif
 
 /* A collected description of an entire row of the abstract CFI table.  */
 struct GTY(()) dw_cfi_row
@@ -65,6 +68,9 @@ struct GTY(()) dw_cfi_row
 
   /* The expressions for any register column that is saved.  */
   cfi_vec reg_save;
+
+  /* True if the register window is saved.  */
+  bool window_save;
 };
 
 /* The caller's ORIG_REG is saved in SAVED_IN_REG.  */
@@ -103,8 +109,8 @@ struct dw_trace_info
      while scanning insns.  However, the args_size value is irrelevant at
      any point except can_throw_internal_p insns.  Therefore the "delay"
      sizes the values that must actually be emitted for this trace.  */
-  HOST_WIDE_INT beg_true_args_size, end_true_args_size;
-  HOST_WIDE_INT beg_delay_args_size, end_delay_args_size;
+  poly_int64_pod beg_true_args_size, end_true_args_size;
+  poly_int64_pod beg_delay_args_size, end_delay_args_size;
 
   /* The first EH insn in the trace, where beg_delay_args_size must be set.  */
   rtx_insn *eh_head;
@@ -144,6 +150,9 @@ struct dw_trace_info
 
   /* True if we've seen different values incoming to beg_true_args_size.  */
   bool args_size_undefined;
+
+  /* True if we've seen an insn with a REG_ARGS_SIZE note before EH_HEAD.  */
+  bool args_size_defined_for_eh;
 };
 
 
@@ -207,7 +216,7 @@ static dw_cfa_location *cur_cfa;
 struct queued_reg_save {
   rtx reg;
   rtx saved_reg;
-  HOST_WIDE_INT cfa_offset;
+  poly_int64_pod cfa_offset;
 };
 
 
@@ -233,7 +242,7 @@ expand_builtin_dwarf_sp_column (void)
    which has mode MODE.  Initialize column C as a return address column.  */
 
 static void
-init_return_column_size (machine_mode mode, rtx mem, unsigned int c)
+init_return_column_size (scalar_int_mode mode, rtx mem, unsigned int c)
 {
   HOST_WIDE_INT offset = c * GET_MODE_SIZE (mode);
   HOST_WIDE_INT size = GET_MODE_SIZE (Pmode);
@@ -271,8 +280,8 @@ void init_one_dwarf_reg_size (int regno, machine_mode regmode,
   const unsigned int rnum = DWARF2_FRAME_REG_OUT (dnum, 1);
   const unsigned int dcol = DWARF_REG_TO_UNWIND_COLUMN (rnum);
   
-  const HOST_WIDE_INT slotoffset = dcol * GET_MODE_SIZE (slotmode);
-  const HOST_WIDE_INT regsize = GET_MODE_SIZE (regmode);
+  poly_int64 slotoffset = dcol * GET_MODE_SIZE (slotmode);
+  poly_int64 regsize = GET_MODE_SIZE (regmode);
 
   init_state->processed_regno[regno] = true;
 
@@ -286,7 +295,8 @@ void init_one_dwarf_reg_size (int regno, machine_mode regmode,
       init_state->wrote_return_column = true;
     }
 
-  if (slotoffset < 0)
+  /* ??? When is this true?  Should it be a test based on DCOL instead?  */
+  if (maybe_lt (slotoffset, 0))
     return;
 
   emit_move_insn (adjust_address (table, slotmode, slotoffset),
@@ -300,7 +310,7 @@ void
 expand_builtin_init_dwarf_reg_sizes (tree address)
 {
   unsigned int i;
-  machine_mode mode = TYPE_MODE (char_type_node);
+  scalar_int_mode mode = SCALAR_INT_TYPE_MODE (char_type_node);
   rtx addr = expand_normal (address);
   rtx mem = gen_rtx_MEM (BLKmode, addr);
 
@@ -435,6 +445,16 @@ copy_cfi_row (dw_cfi_row *src)
   return dst;
 }
 
+/* Return a copy of an existing CFA location.  */
+
+static dw_cfa_location *
+copy_cfa (dw_cfa_location *src)
+{
+  dw_cfa_location *dst = ggc_alloc<dw_cfa_location> ();
+  *dst = *src;
+  return dst;
+}
+
 /* Generate a new label for the CFI info to refer to.  */
 
 static char *
@@ -466,16 +486,19 @@ add_cfi (dw_cfi_ref cfi)
 }
 
 static void
-add_cfi_args_size (HOST_WIDE_INT size)
+add_cfi_args_size (poly_int64 size)
 {
+  /* We don't yet have a representation for polynomial sizes.  */
+  HOST_WIDE_INT const_size = size.to_constant ();
+
   dw_cfi_ref cfi = new_cfi ();
 
   /* While we can occasionally have args_size < 0 internally, this state
      should not persist at a point we actually need an opcode.  */
-  gcc_assert (size >= 0);
+  gcc_assert (const_size >= 0);
 
   cfi->dw_cfi_opc = DW_CFA_GNU_args_size;
-  cfi->dw_cfi_oprnd1.dw_cfi_offset = size;
+  cfi->dw_cfi_oprnd1.dw_cfi_offset = const_size;
 
   add_cfi (cfi);
 }
@@ -630,7 +653,10 @@ lookup_cfa_1 (dw_cfi_ref cfi, dw_cfa_location *loc, dw_cfa_location *remember)
       loc->offset = cfi->dw_cfi_oprnd2.dw_cfi_offset;
       break;
     case DW_CFA_def_cfa_expression:
-      get_cfa_from_loc_descr (loc, cfi->dw_cfi_oprnd1.dw_cfi_loc);
+      if (cfi->dw_cfi_oprnd2.dw_cfi_cfa_loc)
+	*loc = *cfi->dw_cfi_oprnd2.dw_cfi_cfa_loc;
+      else
+	get_cfa_from_loc_descr (loc, cfi->dw_cfi_oprnd1.dw_cfi_loc);
       break;
 
     case DW_CFA_remember_state:
@@ -655,10 +681,10 @@ bool
 cfa_equal_p (const dw_cfa_location *loc1, const dw_cfa_location *loc2)
 {
   return (loc1->reg == loc2->reg
-	  && loc1->offset == loc2->offset
+	  && known_eq (loc1->offset, loc2->offset)
 	  && loc1->indirect == loc2->indirect
 	  && (loc1->indirect == 0
-	      || loc1->base_offset == loc2->base_offset));
+	      || known_eq (loc1->base_offset, loc2->base_offset)));
 }
 
 /* Determine if two CFI operands are identical.  */
@@ -679,6 +705,8 @@ cfi_oprnd_equal_p (enum dw_cfi_oprnd_type t, dw_cfi_oprnd *a, dw_cfi_oprnd *b)
 	      || strcmp (a->dw_cfi_addr, b->dw_cfi_addr) == 0);
     case dw_cfi_oprnd_loc:
       return loc_descr_equal_p (a->dw_cfi_loc, b->dw_cfi_loc);
+    case dw_cfi_oprnd_cfa_loc:
+      return cfa_equal_p (a->dw_cfi_cfa_loc, b->dw_cfi_cfa_loc);
     }
   gcc_unreachable ();
 }
@@ -741,6 +769,9 @@ cfi_row_equal_p (dw_cfi_row *a, dw_cfi_row *b)
         return false;
     }
 
+  if (a->window_save != b->window_save)
+    return false;
+
   return true;
 }
 
@@ -759,42 +790,50 @@ def_cfa_0 (dw_cfa_location *old_cfa, dw_cfa_location *new_cfa)
 
   cfi = new_cfi ();
 
-  if (new_cfa->reg == old_cfa->reg && !new_cfa->indirect && !old_cfa->indirect)
+  HOST_WIDE_INT const_offset;
+  if (new_cfa->reg == old_cfa->reg
+      && !new_cfa->indirect
+      && !old_cfa->indirect
+      && new_cfa->offset.is_constant (&const_offset))
     {
       /* Construct a "DW_CFA_def_cfa_offset <offset>" instruction, indicating
 	 the CFA register did not change but the offset did.  The data
 	 factoring for DW_CFA_def_cfa_offset_sf happens in output_cfi, or
 	 in the assembler via the .cfi_def_cfa_offset directive.  */
-      if (new_cfa->offset < 0)
+      if (const_offset < 0)
 	cfi->dw_cfi_opc = DW_CFA_def_cfa_offset_sf;
       else
 	cfi->dw_cfi_opc = DW_CFA_def_cfa_offset;
-      cfi->dw_cfi_oprnd1.dw_cfi_offset = new_cfa->offset;
+      cfi->dw_cfi_oprnd1.dw_cfi_offset = const_offset;
     }
-  else if (new_cfa->offset == old_cfa->offset
+  else if (new_cfa->offset.is_constant ()
+	   && known_eq (new_cfa->offset, old_cfa->offset)
 	   && old_cfa->reg != INVALID_REGNUM
 	   && !new_cfa->indirect
 	   && !old_cfa->indirect)
     {
       /* Construct a "DW_CFA_def_cfa_register <register>" instruction,
 	 indicating the CFA register has changed to <register> but the
-	 offset has not changed.  */
+	 offset has not changed.  This requires the old CFA to have
+	 been set as a register plus offset rather than a general
+	 DW_CFA_def_cfa_expression.  */
       cfi->dw_cfi_opc = DW_CFA_def_cfa_register;
       cfi->dw_cfi_oprnd1.dw_cfi_reg_num = new_cfa->reg;
     }
-  else if (new_cfa->indirect == 0)
+  else if (new_cfa->indirect == 0
+	   && new_cfa->offset.is_constant (&const_offset))
     {
       /* Construct a "DW_CFA_def_cfa <register> <offset>" instruction,
 	 indicating the CFA register has changed to <register> with
 	 the specified offset.  The data factoring for DW_CFA_def_cfa_sf
 	 happens in output_cfi, or in the assembler via the .cfi_def_cfa
 	 directive.  */
-      if (new_cfa->offset < 0)
+      if (const_offset < 0)
 	cfi->dw_cfi_opc = DW_CFA_def_cfa_sf;
       else
 	cfi->dw_cfi_opc = DW_CFA_def_cfa;
       cfi->dw_cfi_oprnd1.dw_cfi_reg_num = new_cfa->reg;
-      cfi->dw_cfi_oprnd2.dw_cfi_offset = new_cfa->offset;
+      cfi->dw_cfi_oprnd2.dw_cfi_offset = const_offset;
     }
   else
     {
@@ -806,6 +845,13 @@ def_cfa_0 (dw_cfa_location *old_cfa, dw_cfa_location *new_cfa)
       cfi->dw_cfi_opc = DW_CFA_def_cfa_expression;
       loc_list = build_cfa_loc (new_cfa, 0);
       cfi->dw_cfi_oprnd1.dw_cfi_loc = loc_list;
+      if (!new_cfa->offset.is_constant ()
+	  || !new_cfa->base_offset.is_constant ())
+	/* It's hard to reconstruct the CFA location for a polynomial
+	   expression, so just cache it instead.  */
+	cfi->dw_cfi_oprnd2.dw_cfi_cfa_loc = copy_cfa (new_cfa);
+      else
+	cfi->dw_cfi_oprnd2.dw_cfi_cfa_loc = NULL;
     }
 
   return cfi;
@@ -837,33 +883,42 @@ def_cfa_1 (dw_cfa_location *new_cfa)
    otherwise it is saved in SREG.  */
 
 static void
-reg_save (unsigned int reg, unsigned int sreg, HOST_WIDE_INT offset)
+reg_save (unsigned int reg, unsigned int sreg, poly_int64 offset)
 {
   dw_fde_ref fde = cfun ? cfun->fde : NULL;
   dw_cfi_ref cfi = new_cfi ();
 
   cfi->dw_cfi_oprnd1.dw_cfi_reg_num = reg;
 
-  /* When stack is aligned, store REG using DW_CFA_expression with FP.  */
-  if (fde
-      && fde->stack_realign
-      && sreg == INVALID_REGNUM)
+  if (sreg == INVALID_REGNUM)
     {
-      cfi->dw_cfi_opc = DW_CFA_expression;
-      cfi->dw_cfi_oprnd1.dw_cfi_reg_num = reg;
-      cfi->dw_cfi_oprnd2.dw_cfi_loc
-	= build_cfa_aligned_loc (&cur_row->cfa, offset,
-				 fde->stack_realignment);
-    }
-  else if (sreg == INVALID_REGNUM)
-    {
-      if (need_data_align_sf_opcode (offset))
-	cfi->dw_cfi_opc = DW_CFA_offset_extended_sf;
-      else if (reg & ~0x3f)
-	cfi->dw_cfi_opc = DW_CFA_offset_extended;
+      HOST_WIDE_INT const_offset;
+      /* When stack is aligned, store REG using DW_CFA_expression with FP.  */
+      if (fde && fde->stack_realign)
+	{
+	  cfi->dw_cfi_opc = DW_CFA_expression;
+	  cfi->dw_cfi_oprnd1.dw_cfi_reg_num = reg;
+	  cfi->dw_cfi_oprnd2.dw_cfi_loc
+	    = build_cfa_aligned_loc (&cur_row->cfa, offset,
+				     fde->stack_realignment);
+	}
+      else if (offset.is_constant (&const_offset))
+	{
+	  if (need_data_align_sf_opcode (const_offset))
+	    cfi->dw_cfi_opc = DW_CFA_offset_extended_sf;
+	  else if (reg & ~0x3f)
+	    cfi->dw_cfi_opc = DW_CFA_offset_extended;
+	  else
+	    cfi->dw_cfi_opc = DW_CFA_offset;
+	  cfi->dw_cfi_oprnd2.dw_cfi_offset = const_offset;
+	}
       else
-	cfi->dw_cfi_opc = DW_CFA_offset;
-      cfi->dw_cfi_oprnd2.dw_cfi_offset = offset;
+	{
+	  cfi->dw_cfi_opc = DW_CFA_expression;
+	  cfi->dw_cfi_oprnd1.dw_cfi_reg_num = reg;
+	  cfi->dw_cfi_oprnd2.dw_cfi_loc
+	    = build_cfa_loc (&cur_row->cfa, offset);
+	}
     }
   else if (sreg == reg)
     {
@@ -889,16 +944,19 @@ reg_save (unsigned int reg, unsigned int sreg, HOST_WIDE_INT offset)
 static void
 notice_args_size (rtx_insn *insn)
 {
-  HOST_WIDE_INT args_size, delta;
+  poly_int64 args_size, delta;
   rtx note;
 
   note = find_reg_note (insn, REG_ARGS_SIZE, NULL);
   if (note == NULL)
     return;
 
-  args_size = INTVAL (XEXP (note, 0));
+  if (!cur_trace->eh_head)
+    cur_trace->args_size_defined_for_eh = true;
+
+  args_size = get_args_size (note);
   delta = args_size - cur_trace->end_true_args_size;
-  if (delta == 0)
+  if (known_eq (delta, 0))
     return;
 
   cur_trace->end_true_args_size = args_size;
@@ -924,16 +982,14 @@ notice_args_size (rtx_insn *insn)
 static void
 notice_eh_throw (rtx_insn *insn)
 {
-  HOST_WIDE_INT args_size;
-
-  args_size = cur_trace->end_true_args_size;
+  poly_int64 args_size = cur_trace->end_true_args_size;
   if (cur_trace->eh_head == NULL)
     {
       cur_trace->eh_head = insn;
       cur_trace->beg_delay_args_size = args_size;
       cur_trace->end_delay_args_size = args_size;
     }
-  else if (cur_trace->end_delay_args_size != args_size)
+  else if (maybe_ne (cur_trace->end_delay_args_size, args_size))
     {
       cur_trace->end_delay_args_size = args_size;
 
@@ -996,7 +1052,7 @@ record_reg_saved_in_reg (rtx dest, rtx src)
    SREG, or if SREG is NULL then it is saved at OFFSET to the CFA.  */
 
 static void
-queue_reg_save (rtx reg, rtx sreg, HOST_WIDE_INT offset)
+queue_reg_save (rtx reg, rtx sreg, poly_int64 offset)
 {
   queued_reg_save *q;
   queued_reg_save e = {reg, sreg, offset};
@@ -1098,20 +1154,11 @@ dwarf2out_frame_debug_def_cfa (rtx pat)
 {
   memset (cur_cfa, 0, sizeof (*cur_cfa));
 
-  if (GET_CODE (pat) == PLUS)
-    {
-      cur_cfa->offset = INTVAL (XEXP (pat, 1));
-      pat = XEXP (pat, 0);
-    }
+  pat = strip_offset (pat, &cur_cfa->offset);
   if (MEM_P (pat))
     {
       cur_cfa->indirect = 1;
-      pat = XEXP (pat, 0);
-      if (GET_CODE (pat) == PLUS)
-	{
-	  cur_cfa->base_offset = INTVAL (XEXP (pat, 1));
-	  pat = XEXP (pat, 0);
-	}
+      pat = strip_offset (XEXP (pat, 0), &cur_cfa->base_offset);
     }
   /* ??? If this fails, we could be calling into the _loc functions to
      define a full expression.  So far no port does that.  */
@@ -1134,7 +1181,7 @@ dwarf2out_frame_debug_adjust_cfa (rtx pat)
     {
     case PLUS:
       gcc_assert (dwf_regno (XEXP (src, 0)) == cur_cfa->reg);
-      cur_cfa->offset -= INTVAL (XEXP (src, 1));
+      cur_cfa->offset -= rtx_to_poly_int64 (XEXP (src, 1));
       break;
 
     case REG:
@@ -1153,7 +1200,7 @@ dwarf2out_frame_debug_adjust_cfa (rtx pat)
 static void
 dwarf2out_frame_debug_cfa_offset (rtx set)
 {
-  HOST_WIDE_INT offset;
+  poly_int64 offset;
   rtx src, addr, span;
   unsigned int sregno;
 
@@ -1171,7 +1218,7 @@ dwarf2out_frame_debug_cfa_offset (rtx set)
       break;
     case PLUS:
       gcc_assert (dwf_regno (XEXP (addr, 0)) == cur_cfa->reg);
-      offset = INTVAL (XEXP (addr, 1)) - cur_cfa->offset;
+      offset = rtx_to_poly_int64 (XEXP (addr, 1)) - cur_cfa->offset;
       break;
     default:
       gcc_unreachable ();
@@ -1196,7 +1243,7 @@ dwarf2out_frame_debug_cfa_offset (rtx set)
     {
       /* We have a PARALLEL describing where the contents of SRC live.
    	 Adjust the offset for each piece of the PARALLEL.  */
-      HOST_WIDE_INT span_offset = offset;
+      poly_int64 span_offset = offset;
 
       gcc_assert (GET_CODE (span) == PARALLEL);
 
@@ -1235,7 +1282,7 @@ dwarf2out_frame_debug_cfa_register (rtx set)
   reg_save (sregno, dregno, 0);
 }
 
-/* A subroutine of dwarf2out_frame_debug, process a REG_CFA_EXPRESSION note. */
+/* A subroutine of dwarf2out_frame_debug, process a REG_CFA_EXPRESSION note.  */
 
 static void
 dwarf2out_frame_debug_cfa_expression (rtx set)
@@ -1265,6 +1312,29 @@ dwarf2out_frame_debug_cfa_expression (rtx set)
      and, as above, we could manage flushing for epilogues.  */
   add_cfi (cfi);
   update_row_reg_save (cur_row, regno, cfi);
+}
+
+/* A subroutine of dwarf2out_frame_debug, process a REG_CFA_VAL_EXPRESSION
+   note.  */
+
+static void
+dwarf2out_frame_debug_cfa_val_expression (rtx set)
+{
+  rtx dest = SET_DEST (set);
+  gcc_assert (REG_P (dest));
+
+  rtx span = targetm.dwarf_register_span (dest);
+  gcc_assert (!span);
+
+  rtx src = SET_SRC (set);
+  dw_cfi_ref cfi = new_cfi ();
+  cfi->dw_cfi_opc = DW_CFA_val_expression;
+  cfi->dw_cfi_oprnd1.dw_cfi_reg_num = dwf_regno (dest);
+  cfi->dw_cfi_oprnd2.dw_cfi_loc
+    = mem_loc_descriptor (src, GET_MODE (src),
+			  GET_MODE (dest), VAR_INIT_STATUS_INITIALIZED);
+  add_cfi (cfi);
+  update_row_reg_save (cur_row, dwf_regno (dest), cfi);
 }
 
 /* A subroutine of dwarf2out_frame_debug, process a REG_CFA_RESTORE note.  */
@@ -1300,16 +1370,20 @@ dwarf2out_frame_debug_cfa_restore (rtx reg)
 }
 
 /* A subroutine of dwarf2out_frame_debug, process a REG_CFA_WINDOW_SAVE.
-   ??? Perhaps we should note in the CIE where windows are saved (instead of
-   assuming 0(cfa)) and what registers are in the window.  */
+   FAKE is true if this is not really a window save but something else.
+
+   ??? Perhaps we should note in the CIE where windows are saved (instead
+   of assuming 0(cfa)) and what registers are in the window.  */
 
 static void
-dwarf2out_frame_debug_cfa_window_save (void)
+dwarf2out_frame_debug_cfa_window_save (bool fake)
 {
   dw_cfi_ref cfi = new_cfi ();
 
   cfi->dw_cfi_opc = DW_CFA_GNU_window_save;
   add_cfi (cfi);
+  if (!fake)
+    cur_row->window_save = true;
 }
 
 /* Record call frame debugging information for an expression EXPR,
@@ -1513,7 +1587,7 @@ static void
 dwarf2out_frame_debug_expr (rtx expr)
 {
   rtx src, dest, span;
-  HOST_WIDE_INT offset;
+  poly_int64 offset;
   dw_fde_ref fde;
 
   /* If RTX_FRAME_RELATED_P is set on a PARALLEL, process each member of
@@ -1617,19 +1691,14 @@ dwarf2out_frame_debug_expr (rtx expr)
 	    {
 	      /* Rule 2 */
 	      /* Adjusting SP.  */
-	      switch (GET_CODE (XEXP (src, 1)))
+	      if (REG_P (XEXP (src, 1)))
 		{
-		case CONST_INT:
-		  offset = INTVAL (XEXP (src, 1));
-		  break;
-		case REG:
 		  gcc_assert (dwf_regno (XEXP (src, 1))
 			      == cur_trace->cfa_temp.reg);
 		  offset = cur_trace->cfa_temp.offset;
-		  break;
-		default:
-		  gcc_unreachable ();
 		}
+	      else if (!poly_int_rtx_p (XEXP (src, 1), &offset))
+		gcc_unreachable ();
 
 	      if (XEXP (src, 0) == hard_frame_pointer_rtx)
 		{
@@ -1658,9 +1727,8 @@ dwarf2out_frame_debug_expr (rtx expr)
 	      gcc_assert (frame_pointer_needed);
 
 	      gcc_assert (REG_P (XEXP (src, 0))
-			  && dwf_regno (XEXP (src, 0)) == cur_cfa->reg
-			  && CONST_INT_P (XEXP (src, 1)));
-	      offset = INTVAL (XEXP (src, 1));
+			  && dwf_regno (XEXP (src, 0)) == cur_cfa->reg);
+	      offset = rtx_to_poly_int64 (XEXP (src, 1));
 	      if (GET_CODE (src) != MINUS)
 		offset = -offset;
 	      cur_cfa->offset += offset;
@@ -1673,11 +1741,11 @@ dwarf2out_frame_debug_expr (rtx expr)
 	      /* Rule 4 */
 	      if (REG_P (XEXP (src, 0))
 		  && dwf_regno (XEXP (src, 0)) == cur_cfa->reg
-		  && CONST_INT_P (XEXP (src, 1)))
+		  && poly_int_rtx_p (XEXP (src, 1), &offset))
 		{
 		  /* Setting a temporary CFA register that will be copied
 		     into the FP later on.  */
-		  offset = - INTVAL (XEXP (src, 1));
+		  offset = -offset;
 		  cur_cfa->offset += offset;
 		  cur_cfa->reg = dwf_regno (dest);
 		  /* Or used to save regs to the stack.  */
@@ -1700,11 +1768,9 @@ dwarf2out_frame_debug_expr (rtx expr)
 
 	      /* Rule 9 */
 	      else if (GET_CODE (src) == LO_SUM
-		       && CONST_INT_P (XEXP (src, 1)))
-		{
-		  cur_trace->cfa_temp.reg = dwf_regno (dest);
-		  cur_trace->cfa_temp.offset = INTVAL (XEXP (src, 1));
-		}
+		       && poly_int_rtx_p (XEXP (src, 1),
+					  &cur_trace->cfa_temp.offset))
+		cur_trace->cfa_temp.reg = dwf_regno (dest);
 	      else
 		gcc_unreachable ();
 	    }
@@ -1712,8 +1778,9 @@ dwarf2out_frame_debug_expr (rtx expr)
 
 	  /* Rule 6 */
 	case CONST_INT:
+	case CONST_POLY_INT:
 	  cur_trace->cfa_temp.reg = dwf_regno (dest);
-	  cur_trace->cfa_temp.offset = INTVAL (src);
+	  cur_trace->cfa_temp.offset = rtx_to_poly_int64 (src);
 	  break;
 
 	  /* Rule 7 */
@@ -1723,7 +1790,11 @@ dwarf2out_frame_debug_expr (rtx expr)
 		      && CONST_INT_P (XEXP (src, 1)));
 
 	  cur_trace->cfa_temp.reg = dwf_regno (dest);
-	  cur_trace->cfa_temp.offset |= INTVAL (XEXP (src, 1));
+	  if (!can_ior_p (cur_trace->cfa_temp.offset, INTVAL (XEXP (src, 1)),
+			  &cur_trace->cfa_temp.offset))
+	    /* The target shouldn't generate this kind of CFI note if we
+	       can't represent it.  */
+	    gcc_unreachable ();
 	  break;
 
 	  /* Skip over HIGH, assuming it will be followed by a LO_SUM,
@@ -1778,9 +1849,7 @@ dwarf2out_frame_debug_expr (rtx expr)
 	case PRE_MODIFY:
 	case POST_MODIFY:
 	  /* We can't handle variable size modifications.  */
-	  gcc_assert (GET_CODE (XEXP (XEXP (XEXP (dest, 0), 1), 1))
-		      == CONST_INT);
-	  offset = -INTVAL (XEXP (XEXP (XEXP (dest, 0), 1), 1));
+	  offset = -rtx_to_poly_int64 (XEXP (XEXP (XEXP (dest, 0), 1), 1));
 
 	  gcc_assert (REGNO (XEXP (XEXP (dest, 0), 0)) == STACK_POINTER_REGNUM
 		      && cur_trace->cfa_store.reg == dw_stack_pointer_regnum);
@@ -1838,9 +1907,8 @@ dwarf2out_frame_debug_expr (rtx expr)
 	  {
 	    unsigned int regno;
 
-	    gcc_assert (CONST_INT_P (XEXP (XEXP (dest, 0), 1))
-			&& REG_P (XEXP (XEXP (dest, 0), 0)));
-	    offset = INTVAL (XEXP (XEXP (dest, 0), 1));
+	    gcc_assert (REG_P (XEXP (XEXP (dest, 0), 0)));
+	    offset = rtx_to_poly_int64 (XEXP (XEXP (dest, 0), 1));
 	    if (GET_CODE (XEXP (dest, 0)) == MINUS)
 	      offset = -offset;
 
@@ -1901,7 +1969,7 @@ dwarf2out_frame_debug_expr (rtx expr)
 	{
 	  /* We're storing the current CFA reg into the stack.  */
 
-	  if (cur_cfa->offset == 0)
+	  if (known_eq (cur_cfa->offset, 0))
 	    {
               /* Rule 19 */
               /* If stack is aligned, putting CFA reg into stack means
@@ -1959,7 +2027,7 @@ dwarf2out_frame_debug_expr (rtx expr)
 	{
 	  /* We have a PARALLEL describing where the contents of SRC live.
 	     Queue register saves for each piece of the PARALLEL.  */
-	  HOST_WIDE_INT span_offset = offset;
+	  poly_int64 span_offset = offset;
 
 	  gcc_assert (GET_CODE (span) == PARALLEL);
 
@@ -2033,10 +2101,16 @@ dwarf2out_frame_debug (rtx_insn *insn)
 	break;
 
       case REG_CFA_EXPRESSION:
+      case REG_CFA_VAL_EXPRESSION:
 	n = XEXP (note, 0);
 	if (n == NULL)
 	  n = single_set (insn);
-	dwarf2out_frame_debug_cfa_expression (n);
+
+	if (REG_NOTE_KIND (note) == REG_CFA_EXPRESSION)
+	  dwarf2out_frame_debug_cfa_expression (n);
+	else
+	  dwarf2out_frame_debug_cfa_val_expression (n);
+
 	handled_one = true;
 	break;
 
@@ -2068,8 +2142,14 @@ dwarf2out_frame_debug (rtx_insn *insn)
 	handled_one = true;
 	break;
 
+      case REG_CFA_TOGGLE_RA_MANGLE:
+	/* This uses the same DWARF opcode as the next operation.  */
+	dwarf2out_frame_debug_cfa_window_save (true);
+	handled_one = true;
+	break;
+
       case REG_CFA_WINDOW_SAVE:
-	dwarf2out_frame_debug_cfa_window_save ();
+	dwarf2out_frame_debug_cfa_window_save (false);
 	handled_one = true;
 	break;
 
@@ -2133,6 +2213,14 @@ change_cfi_row (dw_cfi_row *old_row, dw_cfi_row *new_row)
       else if (!cfi_equal_p (r_old, r_new))
         add_cfi (r_new);
     }
+
+  if (!old_row->window_save && new_row->window_save)
+    {
+      dw_cfi_ref cfi = new_cfi ();
+
+      cfi->dw_cfi_opc = DW_CFA_GNU_window_save;
+      add_cfi (cfi);
+    }
 }
 
 /* Examine CFI and return true if a cfi label and set_loc is needed
@@ -2179,20 +2267,13 @@ add_cfis_to_fde (void)
 {
   dw_fde_ref fde = cfun->fde;
   rtx_insn *insn, *next;
-  /* We always start with a function_begin label.  */
-  bool first = false;
 
   for (insn = get_insns (); insn; insn = next)
     {
       next = NEXT_INSN (insn);
 
       if (NOTE_P (insn) && NOTE_KIND (insn) == NOTE_INSN_SWITCH_TEXT_SECTIONS)
-	{
-	  fde->dw_fde_switch_cfi_index = vec_safe_length (fde->dw_fde_cfi);
-	  /* Don't attempt to advance_loc4 between labels
-	     in different sections.  */
-	  first = true;
-	}
+	fde->dw_fde_switch_cfi_index = vec_safe_length (fde->dw_fde_cfi);
 
       if (NOTE_P (insn) && NOTE_KIND (insn) == NOTE_INSN_CFI)
 	{
@@ -2217,8 +2298,7 @@ add_cfis_to_fde (void)
 
 	      /* Set the location counter to the new label.  */
 	      xcfi = new_cfi ();
-	      xcfi->dw_cfi_opc = (first ? DW_CFA_set_loc
-				  : DW_CFA_advance_loc4);
+	      xcfi->dw_cfi_opc = DW_CFA_advance_loc4;
 	      xcfi->dw_cfi_oprnd1.dw_cfi_addr = label;
 	      vec_safe_push (fde->dw_fde_cfi, xcfi);
 
@@ -2233,10 +2313,11 @@ add_cfis_to_fde (void)
 	      insn = NEXT_INSN (insn);
 	    }
 	  while (insn != next);
-	  first = false;
 	}
     }
 }
+
+static void dump_cfi_row (FILE *f, dw_cfi_row *row);
 
 /* If LABEL is the start of a trace, then initialize the state of that
    trace from CUR_TRACE and CUR_ROW.  */
@@ -2245,7 +2326,6 @@ static void
 maybe_record_trace_start (rtx_insn *start, rtx_insn *origin)
 {
   dw_trace_info *ti;
-  HOST_WIDE_INT args_size;
 
   ti = get_trace_info (start);
   gcc_assert (ti != NULL);
@@ -2258,7 +2338,7 @@ maybe_record_trace_start (rtx_insn *start, rtx_insn *origin)
 	       (origin ? INSN_UID (origin) : 0));
     }
 
-  args_size = cur_trace->end_true_args_size;
+  poly_int64 args_size = cur_trace->end_true_args_size;
   if (ti->beg_row == NULL)
     {
       /* This is the first time we've encountered this trace.  Propagate
@@ -2281,10 +2361,24 @@ maybe_record_trace_start (rtx_insn *start, rtx_insn *origin)
       /* We ought to have the same state incoming to a given trace no
 	 matter how we arrive at the trace.  Anything else means we've
 	 got some kind of optimization error.  */
-      gcc_checking_assert (cfi_row_equal_p (cur_row, ti->beg_row));
+#if CHECKING_P
+      if (!cfi_row_equal_p (cur_row, ti->beg_row))
+	{
+	  if (dump_file)
+	    {
+	      fprintf (dump_file, "Inconsistent CFI state!\n");
+	      fprintf (dump_file, "SHOULD have:\n");
+	      dump_cfi_row (dump_file, ti->beg_row);
+	      fprintf (dump_file, "DO have:\n");
+	      dump_cfi_row (dump_file, cur_row);
+	    }
+
+	  gcc_unreachable ();
+	}
+#endif
 
       /* The args_size is allowed to conflict if it isn't actually used.  */
-      if (ti->beg_true_args_size != args_size)
+      if (maybe_ne (ti->beg_true_args_size, args_size))
 	ti->args_size_undefined = true;
     }
 }
@@ -2295,11 +2389,11 @@ maybe_record_trace_start (rtx_insn *start, rtx_insn *origin)
 static void
 maybe_record_trace_start_abnormal (rtx_insn *start, rtx_insn *origin)
 {
-  HOST_WIDE_INT save_args_size, delta;
+  poly_int64 save_args_size, delta;
   dw_cfa_location save_cfa;
 
   save_args_size = cur_trace->end_true_args_size;
-  if (save_args_size == 0)
+  if (known_eq (save_args_size, 0))
     {
       maybe_record_trace_start (start, origin);
       return;
@@ -2354,8 +2448,10 @@ create_trace_edges (rtx_insn *insn)
 	}
       else if (computed_jump_p (insn))
 	{
-	  for (rtx_insn_list *lab = forced_labels; lab; lab = lab->next ())
-	    maybe_record_trace_start (lab->insn (), insn);
+	  rtx_insn *temp;
+	  unsigned int i;
+	  FOR_EACH_VEC_SAFE_ELT (forced_labels, i, temp)
+	    maybe_record_trace_start (temp, insn);
 	}
       else if (returnjump_p (insn))
 	;
@@ -2420,7 +2516,7 @@ scan_insn_after (rtx_insn *insn)
    instructions therein.  */
 
 static void
-scan_trace (dw_trace_info *trace)
+scan_trace (dw_trace_info *trace, bool entry)
 {
   rtx_insn *prev, *insn = trace->head;
   dw_cfa_location this_cfa;
@@ -2438,6 +2534,17 @@ scan_trace (dw_trace_info *trace)
 
   this_cfa = cur_row->cfa;
   cur_cfa = &this_cfa;
+
+  /* If the current function starts with a non-standard incoming frame
+     sp offset, emit a note before the first instruction.  */
+  if (entry
+      && DEFAULT_INCOMING_FRAME_SP_OFFSET != INCOMING_FRAME_SP_OFFSET)
+    {
+      add_cfi_insn = insn;
+      gcc_assert (NOTE_P (insn) && NOTE_KIND (insn) == NOTE_INSN_DELETED);
+      this_cfa.offset = INCOMING_FRAME_SP_OFFSET;
+      def_cfa_1 (&this_cfa);
+    }
 
   for (prev = insn, insn = NEXT_INSN (insn);
        insn;
@@ -2489,7 +2596,6 @@ scan_trace (dw_trace_info *trace)
 
 	      if (INSN_FROM_TARGET_P (elt))
 		{
-		  HOST_WIDE_INT restore_args_size;
 		  cfi_vec save_row_reg_save;
 
 		  /* If ELT is an instruction from target of an annulled
@@ -2497,7 +2603,7 @@ scan_trace (dw_trace_info *trace)
 		     the args_size and CFA along the current path
 		     shouldn't change.  */
 		  add_cfi_insn = NULL;
-		  restore_args_size = cur_trace->end_true_args_size;
+		  poly_int64 restore_args_size = cur_trace->end_true_args_size;
 		  cur_cfa = &cur_row->cfa;
 		  save_row_reg_save = vec_safe_copy (cur_row->reg_save);
 
@@ -2608,12 +2714,12 @@ create_cfi_notes (void)
 
   /* Always begin at the entry trace.  */
   ti = &trace_info[0];
-  scan_trace (ti);
+  scan_trace (ti, true);
 
   while (!trace_work_list.is_empty ())
     {
       ti = trace_work_list.pop ();
-      scan_trace (ti);
+      scan_trace (ti, false);
     }
 
   queued_reg_saves.release ();
@@ -2641,7 +2747,7 @@ before_next_cfi_note (rtx_insn *start)
 static void
 connect_traces (void)
 {
-  unsigned i, n = trace_info.length ();
+  unsigned i, n;
   dw_trace_info *prev_ti, *ti;
 
   /* ??? Ideally, we should have both queued and processed every trace.
@@ -2652,20 +2758,15 @@ connect_traces (void)
      these are not "real" instructions, and should not be considered.
      This could be generically useful for tablejump data as well.  */
   /* Remove all unprocessed traces from the list.  */
-  for (i = n - 1; i > 0; --i)
-    {
-      ti = &trace_info[i];
-      if (ti->beg_row == NULL)
-	{
-	  trace_info.ordered_remove (i);
-	  n -= 1;
-	}
-      else
-	gcc_assert (ti->end_row != NULL);
-    }
+  unsigned ix, ix2;
+  VEC_ORDERED_REMOVE_IF_FROM_TO (trace_info, ix, ix2, ti, 1,
+				 trace_info.length (), ti->beg_row == NULL);
+  FOR_EACH_VEC_ELT (trace_info, ix, ti)
+    gcc_assert (ti->end_row != NULL);
 
   /* Work from the end back to the beginning.  This lets us easily insert
      remember/restore_state notes in the correct order wrt other notes.  */
+  n = trace_info.length ();
   prev_ti = &trace_info[n - 1];
   for (i = n - 1; i > 0; --i)
     {
@@ -2739,7 +2840,7 @@ connect_traces (void)
   /* Connect args_size between traces that have can_throw_internal insns.  */
   if (cfun->eh->lp_array)
     {
-      HOST_WIDE_INT prev_args_size = 0;
+      poly_int64 prev_args_size = 0;
 
       for (i = 0; i < n; ++i)
 	{
@@ -2747,11 +2848,17 @@ connect_traces (void)
 
 	  if (ti->switch_sections)
 	    prev_args_size = 0;
+
 	  if (ti->eh_head == NULL)
 	    continue;
-	  gcc_assert (!ti->args_size_undefined);
 
-	  if (ti->beg_delay_args_size != prev_args_size)
+	  /* We require either the incoming args_size values to match or the
+	     presence of an insn setting it before the first EH insn.  */
+	  gcc_assert (!ti->args_size_undefined || ti->args_size_defined_for_eh);
+
+	  /* In the latter case, we force the creation of a CFI note.  */
+	  if (ti->args_size_undefined
+	      || maybe_ne (ti->beg_delay_args_size, prev_args_size))
 	    {
 	      /* ??? Search back to previous CFI note.  */
 	      add_cfi_insn = PREV_INSN (ti->eh_head);
@@ -2845,7 +2952,7 @@ static void
 initial_return_save (rtx rtl)
 {
   unsigned int reg = INVALID_REGNUM;
-  HOST_WIDE_INT offset = 0;
+  poly_int64 offset = 0;
 
   switch (GET_CODE (rtl))
     {
@@ -2866,12 +2973,12 @@ initial_return_save (rtx rtl)
 
 	case PLUS:
 	  gcc_assert (REGNO (XEXP (rtl, 0)) == STACK_POINTER_REGNUM);
-	  offset = INTVAL (XEXP (rtl, 1));
+	  offset = rtx_to_poly_int64 (XEXP (rtl, 1));
 	  break;
 
 	case MINUS:
 	  gcc_assert (REGNO (XEXP (rtl, 0)) == STACK_POINTER_REGNUM);
-	  offset = -INTVAL (XEXP (rtl, 1));
+	  offset = -rtx_to_poly_int64 (XEXP (rtl, 1));
 	  break;
 
 	default:
@@ -2917,7 +3024,12 @@ create_cie_data (void)
   /* On entry, the Canonical Frame Address is at SP.  */
   memset (&loc, 0, sizeof (loc));
   loc.reg = dw_stack_pointer_regnum;
-  loc.offset = INCOMING_FRAME_SP_OFFSET;
+  /* create_cie_data is called just once per TU, and when using .cfi_startproc
+     is even done by the assembler rather than the compiler.  If the target
+     has different incoming frame sp offsets depending on what kind of
+     function it is, use a single constant offset for the target and
+     if needed, adjust before the first instruction in insn stream.  */
+  loc.offset = DEFAULT_INCOMING_FRAME_SP_OFFSET;
   def_cfa_1 (&loc);
 
   if (targetm.debug_unwind_info () == UI_DWARF2
@@ -3013,7 +3125,8 @@ output_cfa_loc (dw_cfi_ref cfi, int for_eh)
   dw_loc_descr_ref loc;
   unsigned long size;
 
-  if (cfi->dw_cfi_opc == DW_CFA_expression)
+  if (cfi->dw_cfi_opc == DW_CFA_expression
+      || cfi->dw_cfi_opc == DW_CFA_val_expression)
     {
       unsigned r =
 	DWARF2_FRAME_REG_OUT (cfi->dw_cfi_oprnd1.dw_cfi_reg_num, for_eh);
@@ -3039,7 +3152,8 @@ output_cfa_loc_raw (dw_cfi_ref cfi)
   dw_loc_descr_ref loc;
   unsigned long size;
 
-  if (cfi->dw_cfi_opc == DW_CFA_expression)
+  if (cfi->dw_cfi_opc == DW_CFA_expression
+      || cfi->dw_cfi_opc == DW_CFA_val_expression)
     {
       unsigned r =
 	DWARF2_FRAME_REG_OUT (cfi->dw_cfi_oprnd1.dw_cfi_reg_num, 1);
@@ -3186,6 +3300,7 @@ output_cfi (dw_cfi_ref cfi, dw_fde_ref fde, int for_eh)
 
 	case DW_CFA_def_cfa_expression:
 	case DW_CFA_expression:
+	case DW_CFA_val_expression:
 	  output_cfa_loc (cfi, for_eh);
 	  break;
 
@@ -3300,16 +3415,13 @@ output_cfi_directive (FILE *f, dw_cfi_ref cfi)
       break;
 
     case DW_CFA_def_cfa_expression:
-      if (f != asm_out_file)
-	{
-	  fprintf (f, "\t.cfi_def_cfa_expression ...\n");
-	  break;
-	}
-      /* FALLTHRU */
     case DW_CFA_expression:
+    case DW_CFA_val_expression:
       if (f != asm_out_file)
 	{
-	  fprintf (f, "\t.cfi_cfa_expression ...\n");
+	  fprintf (f, "\t.cfi_%scfa_%sexpression ...\n",
+		   cfi->dw_cfi_opc == DW_CFA_def_cfa_expression ? "def_" : "",
+		   cfi->dw_cfi_opc == DW_CFA_val_expression ? "val_" : "");
 	  break;
 	}
       fprintf (f, "\t.cfi_escape %#x,", cfi->dw_cfi_opc);
@@ -3363,6 +3475,17 @@ debug_cfi_row (dw_cfi_row *row)
    This variable is tri-state, with 0 unset, >0 true, <0 false.  */
 static GTY(()) signed char saved_do_cfi_asm = 0;
 
+/* Decide whether to emit EH frame unwind information for the current
+   translation unit.  */
+
+bool
+dwarf2out_do_eh_frame (void)
+{
+  return
+    (flag_unwind_tables || flag_exceptions)
+    && targetm_common.except_unwind_info (&global_options) == UI_DWARF2;
+}
+
 /* Decide whether we want to emit frame unwind information for the current
    translation unit.  */
 
@@ -3381,8 +3504,7 @@ dwarf2out_do_frame (void)
   if (targetm.debug_unwind_info () == UI_DWARF2)
     return true;
 
-  if ((flag_unwind_tables || flag_exceptions)
-      && targetm_common.except_unwind_info (&global_options) == UI_DWARF2)
+  if (dwarf2out_do_eh_frame ())
     return true;
 
   return false;
@@ -3417,9 +3539,7 @@ dwarf2out_do_cfi_asm (void)
 
   /* If we can't get the assembler to emit only .debug_frame, and we don't need
      dwarf2 unwind info for exceptions, then emit .debug_frame by hand.  */
-  if (!HAVE_GAS_CFI_SECTIONS_DIRECTIVE
-      && !flag_unwind_tables && !flag_exceptions
-      && targetm_common.except_unwind_info (&global_options) != UI_DWARF2)
+  if (!HAVE_GAS_CFI_SECTIONS_DIRECTIVE && !dwarf2out_do_eh_frame ())
     return false;
 
   /* Success!  */

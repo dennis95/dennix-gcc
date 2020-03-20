@@ -1,5 +1,5 @@
 /* Pass computing data for optimizing stdarg functions.
-   Copyright (C) 2004-2016 Free Software Foundation, Inc.
+   Copyright (C) 2004-2019 Free Software Foundation, Inc.
    Contributed by Jakub Jelinek <jakub@redhat.com>
 
 This file is part of GCC.
@@ -36,7 +36,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-into-ssa.h"
 #include "tree-cfg.h"
 #include "tree-stdarg.h"
-#include "tree-chkp.h"
 
 /* A simple pass that attempts to optimize stdarg functions on architectures
    that need to save register arguments to stack on entry to stdarg functions.
@@ -53,10 +52,9 @@ along with GCC; see the file COPYING3.  If not see
 static bool
 reachable_at_most_once (basic_block va_arg_bb, basic_block va_start_bb)
 {
-  vec<edge> stack = vNULL;
+  auto_vec<edge, 10> stack;
   edge e;
   edge_iterator ei;
-  sbitmap visited;
   bool ret;
 
   if (va_arg_bb == va_start_bb)
@@ -65,7 +63,7 @@ reachable_at_most_once (basic_block va_arg_bb, basic_block va_start_bb)
   if (! dominated_by_p (CDI_DOMINATORS, va_arg_bb, va_start_bb))
     return false;
 
-  visited = sbitmap_alloc (last_basic_block_for_fn (cfun));
+  auto_sbitmap visited (last_basic_block_for_fn (cfun));
   bitmap_clear (visited);
   ret = true;
 
@@ -105,8 +103,6 @@ reachable_at_most_once (basic_block va_arg_bb, basic_block va_start_bb)
 	}
     }
 
-  stack.release ();
-  sbitmap_free (visited);
   return ret;
 }
 
@@ -276,7 +272,7 @@ find_va_list_reference (tree *tp, int *walk_subtrees ATTRIBUTE_UNUSED,
       if (bitmap_bit_p (va_list_vars, SSA_NAME_VERSION (var)))
 	return var;
     }
-  else if (TREE_CODE (var) == VAR_DECL)
+  else if (VAR_P (var))
     {
       if (bitmap_bit_p (va_list_vars, DECL_UID (var) + num_ssa_names))
 	return var;
@@ -361,7 +357,7 @@ va_list_counter_struct_op (struct stdarg_info *si, tree ap, tree var,
     return false;
 
   base = get_base_address (ap);
-  if (TREE_CODE (base) != VAR_DECL
+  if (!VAR_P (base)
       || !bitmap_bit_p (si->va_list_vars, DECL_UID (base) + num_ssa_names))
     return false;
 
@@ -380,7 +376,7 @@ va_list_counter_struct_op (struct stdarg_info *si, tree ap, tree var,
 static bool
 va_list_ptr_read (struct stdarg_info *si, tree ap, tree tem)
 {
-  if (TREE_CODE (ap) != VAR_DECL
+  if (!VAR_P (ap)
       || !bitmap_bit_p (si->va_list_vars, DECL_UID (ap) + num_ssa_names))
     return false;
 
@@ -430,7 +426,7 @@ va_list_ptr_write (struct stdarg_info *si, tree ap, tree tem2)
 {
   unsigned HOST_WIDE_INT increment;
 
-  if (TREE_CODE (ap) != VAR_DECL
+  if (!VAR_P (ap)
       || !bitmap_bit_p (si->va_list_vars, DECL_UID (ap) + num_ssa_names))
     return false;
 
@@ -625,7 +621,7 @@ check_all_va_list_escapes (struct stdarg_info *si)
 					   SSA_NAME_VERSION (lhs)))
 			continue;
 
-		      if (TREE_CODE (lhs) == VAR_DECL
+		      if (VAR_P (lhs)
 			  && bitmap_bit_p (si->va_list_vars,
 					   DECL_UID (lhs) + num_ssa_names))
 			continue;
@@ -698,7 +694,7 @@ optimize_va_list_gpr_fpr_size (function *fun)
 
 	  callee = gimple_call_fndecl (stmt);
 	  if (!callee
-	      || DECL_BUILT_IN_CLASS (callee) != BUILT_IN_NORMAL)
+	      || !fndecl_built_in_p (callee, BUILT_IN_NORMAL))
 	    continue;
 
 	  switch (DECL_FUNCTION_CODE (callee))
@@ -734,7 +730,7 @@ optimize_va_list_gpr_fpr_size (function *fun)
 	    }
 	  if (TYPE_MAIN_VARIANT (TREE_TYPE (ap))
 	      != TYPE_MAIN_VARIANT (targetm.fn_abi_va_list (fun->decl))
-	      || TREE_CODE (ap) != VAR_DECL)
+	      || !VAR_P (ap))
 	    {
 	      va_list_escapes = true;
 	      break;
@@ -871,9 +867,8 @@ optimize_va_list_gpr_fpr_size (function *fun)
 	      tree callee = gimple_call_fndecl (stmt);
 
 	      if (callee
-		  && DECL_BUILT_IN_CLASS (callee) == BUILT_IN_NORMAL
-		  && (DECL_FUNCTION_CODE (callee) == BUILT_IN_VA_START
-		      || DECL_FUNCTION_CODE (callee) == BUILT_IN_VA_END))
+		  && (fndecl_built_in_p (callee, BUILT_IN_VA_START)
+		      || fndecl_built_in_p (callee, BUILT_IN_VA_END)))
 		continue;
 	    }
 
@@ -994,16 +989,6 @@ finish:
     }
 }
 
-/* Return true if STMT is IFN_VA_ARG.  */
-
-static bool
-gimple_call_ifn_va_arg_p (gimple *stmt)
-{
-  return (is_gimple_call (stmt)
-	  && gimple_call_internal_p (stmt)
-	  && gimple_call_internal_fn (stmt) == IFN_VA_ARG);
-}
-
 /* Expand IFN_VA_ARGs in FUN.  */
 
 static void
@@ -1021,7 +1006,7 @@ expand_ifn_va_arg_1 (function *fun)
 	tree ap, aptype, expr, lhs, type;
 	gimple_seq pre = NULL, post = NULL;
 
-	if (!gimple_call_ifn_va_arg_p (stmt))
+	if (!gimple_call_internal_p (stmt, IFN_VA_ARG))
 	  continue;
 
 	modified = true;
@@ -1051,11 +1036,6 @@ expand_ifn_va_arg_1 (function *fun)
 	    unsigned int nargs = gimple_call_num_args (stmt);
 	    gcc_assert (useless_type_conversion_p (TREE_TYPE (lhs), type));
 
-	    /* We replace call with a new expr.  This may require
-	       corresponding bndret call fixup.  */
-	    if (chkp_function_instrumented_p (fun->decl))
-	      chkp_fixup_inlined_call (lhs, expr);
-
 	    if (nargs == 4)
 	      {
 		/* We've transported the size of with WITH_SIZE_EXPR here as
@@ -1071,7 +1051,7 @@ expand_ifn_va_arg_1 (function *fun)
 	    gimplify_assign (lhs, expr, &pre);
 	  }
 	else
-	  gimplify_expr (&expr, &pre, &post, is_gimple_lvalue, fb_lvalue);
+	  gimplify_and_add (expr, &pre);
 
 	input_location = saved_location;
 	pop_gimplify_context (NULL);
@@ -1119,7 +1099,7 @@ expand_ifn_va_arg (function *fun)
       gimple_stmt_iterator i;
       FOR_EACH_BB_FN (bb, fun)
 	for (i = gsi_start_bb (bb); !gsi_end_p (i); gsi_next (&i))
-	  gcc_assert (!gimple_call_ifn_va_arg_p (gsi_stmt (i)));
+	  gcc_assert (!gimple_call_internal_p (gsi_stmt (i), IFN_VA_ARG));
     }
 }
 

@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2015, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2019, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -34,6 +34,7 @@ with Exp_Ch9;   use Exp_Ch9;
 with Elists;    use Elists;
 with Freeze;    use Freeze;
 with Layout;    use Layout;
+with Lib;       use Lib;
 with Lib.Xref;  use Lib.Xref;
 with Namet;     use Namet;
 with Nlists;    use Nlists;
@@ -49,6 +50,7 @@ with Sem_Ch5;   use Sem_Ch5;
 with Sem_Ch6;   use Sem_Ch6;
 with Sem_Ch8;   use Sem_Ch8;
 with Sem_Ch13;  use Sem_Ch13;
+with Sem_Elab;  use Sem_Elab;
 with Sem_Eval;  use Sem_Eval;
 with Sem_Prag;  use Sem_Prag;
 with Sem_Res;   use Sem_Res;
@@ -126,7 +128,7 @@ package body Sem_Ch9 is
      (N               : Node_Id;
       Lock_Free_Given : Boolean := False) return Boolean
    is
-      Errors_Count : Nat;
+      Errors_Count : Nat := 0;
       --  Errors_Count is a count of errors detected by the compiler so far
       --  when Lock_Free_Given is True.
 
@@ -256,7 +258,7 @@ package body Sem_Ch9 is
                Comp : Entity_Id := Empty;
                --  Track the current component which the body references
 
-               Errors_Count : Nat;
+               Errors_Count : Nat := 0;
                --  Errors_Count is a count of errors detected by the compiler
                --  so far when Lock_Free_Given is True.
 
@@ -290,14 +292,14 @@ package body Sem_Ch9 is
                      pragma Assert (Nkind (Attr) = N_Attribute_Reference);
 
                      case Attribute_Name (Attr) is
-                        when Name_Min             |
-                             Name_Max             |
-                             Name_Pred            |
-                             Name_Succ            |
-                             Name_Value           |
-                             Name_Wide_Value      |
-                             Name_Wide_Wide_Value =>
-
+                        when Name_Max
+                           | Name_Min
+                           | Name_Pred
+                           | Name_Succ
+                           | Name_Value
+                           | Name_Wide_Value
+                           | Name_Wide_Wide_Value
+                        =>
                            --  A language-defined attribute denotes a static
                            --  function if the prefix denotes a static scalar
                            --  subtype, and if the parameter and result types
@@ -324,7 +326,8 @@ package body Sem_Ch9 is
                               return False;
                            end if;
 
-                        when others => return False;
+                        when others =>
+                           return False;
                      end case;
                   end Is_Static_Function;
 
@@ -496,9 +499,10 @@ package body Sem_Ch9 is
 
                      elsif Kind = N_Pragma then
                         declare
-                           Prag_Name : constant Name_Id   := Pragma_Name (N);
+                           Prag_Name : constant Name_Id   :=
+                             Pragma_Name (N);
                            Prag_Id   : constant Pragma_Id :=
-                                         Get_Pragma_Id (Prag_Name);
+                             Get_Pragma_Id (Prag_Name);
 
                         begin
                            if Prag_Id = Pragma_Export
@@ -769,7 +773,7 @@ package body Sem_Ch9 is
       Entry_Nam : Entity_Id;
       E         : Entity_Id;
       Kind      : Entity_Kind;
-      Task_Nam  : Entity_Id;
+      Task_Nam  : Entity_Id := Empty;  -- initialize to prevent warning
 
    begin
       Tasking_Used := True;
@@ -889,13 +893,18 @@ package body Sem_Ch9 is
          loop
             P := Parent (P);
             case Nkind (P) is
-               when N_Task_Body | N_Compilation_Unit =>
+               when N_Compilation_Unit
+                  | N_Task_Body
+               =>
                   exit;
+
                when N_Asynchronous_Select =>
-                  Error_Msg_N ("accept statements are not allowed within" &
-                               " an asynchronous select inner" &
-                               " to the enclosing task body", N);
+                  Error_Msg_N
+                    ("accept statements are not allowed within an "
+                     & "asynchronous select inner to the enclosing task body",
+                     N);
                   exit;
+
                when others =>
                   null;
             end case;
@@ -1145,6 +1154,7 @@ package body Sem_Ch9 is
 
    procedure Analyze_Delay_Relative (N : Node_Id) is
       E : constant Node_Id := Expression (N);
+
    begin
       Tasking_Used := True;
       Check_SPARK_05_Restriction ("delay statement is not allowed", N);
@@ -1153,6 +1163,14 @@ package body Sem_Ch9 is
       Check_Potentially_Blocking_Operation (N);
       Analyze_And_Resolve (E, Standard_Duration);
       Check_Restriction (No_Fixed_Point, E);
+
+      --  In SPARK mode the relative delay statement introduces an implicit
+      --  dependency on the Ada.Real_Time.Clock_Time abstract state, so we must
+      --  force the loading of the Ada.Real_Time package.
+
+      if GNATprove_Mode then
+         SPARK_Implicit_Load (RO_RT_Time);
+      end if;
    end Analyze_Delay_Relative;
 
    -------------------------
@@ -1168,7 +1186,7 @@ package body Sem_Ch9 is
       Check_SPARK_05_Restriction ("delay statement is not allowed", N);
       Check_Restriction (No_Delay, N);
       Check_Potentially_Blocking_Operation (N);
-      Analyze (E);
+      Analyze_And_Resolve (E);
       Typ := First_Subtype (Etype (E));
 
       if not Is_RTE (Typ, RO_CA_Time) and then
@@ -1192,13 +1210,13 @@ package body Sem_Ch9 is
       Entry_Name : Entity_Id;
 
    begin
-      --  An entry body "freezes" the contract of the nearest enclosing package
+      --  An entry body freezes the contract of the nearest enclosing package
       --  body and all other contracts encountered in the same declarative part
       --  up to and excluding the entry body. This ensures that any annotations
       --  referenced by the contract of an entry or subprogram body declared
       --  within the current protected body are available.
 
-      Analyze_Previous_Contracts (N);
+      Freeze_Previous_Contracts (N);
 
       Tasking_Used := True;
 
@@ -1228,7 +1246,7 @@ package body Sem_Ch9 is
       --  Analyze any aspect specifications that appear on the entry body
 
       if Has_Aspects (N) then
-         Analyze_Aspect_Specifications_On_Body_Or_Stub (N);
+         Analyze_Aspects_On_Subprogram_Body_Or_Stub (N);
       end if;
 
       E := First_Entity (P_Type);
@@ -1430,6 +1448,7 @@ package body Sem_Ch9 is
       --  Process the end label, and terminate the scope
 
       Process_End_Label (Handled_Statement_Sequence (N), 't', Entry_Name);
+      Update_Use_Clause_Chain;
       End_Scope;
 
       --  If this is an entry family, remove the loop created to provide
@@ -1638,6 +1657,15 @@ package body Sem_Ch9 is
          Set_SPARK_Pragma_Inherited (Def_Id);
       end if;
 
+      --  Preserve relevant elaboration-related attributes of the context which
+      --  are no longer available or very expensive to recompute once analysis,
+      --  resolution, and expansion are over.
+
+      Mark_Elaboration_Attributes
+        (N_Id     => Def_Id,
+         Checks   => True,
+         Warnings => True);
+
       --  Process formals
 
       if Present (Formals) then
@@ -1666,7 +1694,7 @@ package body Sem_Ch9 is
    --  The Defining_Identifier of the entry index specification is local to the
    --  entry body, but it must be available in the entry barrier which is
    --  evaluated outside of the entry body. The index is eventually renamed as
-   --  a run-time object, so is visibility is strictly a front-end concern. In
+   --  a run-time object, so its visibility is strictly a front-end concern. In
    --  order to make it available to the barrier, we create an additional
    --  scope, as for a loop, whose only declaration is the index name. This
    --  loop is not attached to the tree and does not appear as an entity local
@@ -1767,14 +1795,14 @@ package body Sem_Ch9 is
    --  Start of processing for Analyze_Protected_Body
 
    begin
-      --  A protected body "freezes" the contract of the nearest enclosing
+      --  A protected body freezes the contract of the nearest enclosing
       --  package body and all other contracts encountered in the same
-      --  declarative part up to and excluding the protected body. This ensures
-      --  that any annotations referenced by the contract of an entry or
-      --  subprogram body declared within the current protected body are
-      --  available.
+      --  declarative part up to and excluding the protected body. This
+      --  ensures that any annotations referenced by the contract of an
+      --  entry or subprogram body declared within the current protected
+      --  body are available.
 
-      Analyze_Previous_Contracts (N);
+      Freeze_Previous_Contracts (N);
 
       Tasking_Used := True;
       Set_Ekind (Body_Id, E_Protected_Body);
@@ -1834,6 +1862,7 @@ package body Sem_Ch9 is
       Check_Completion (Body_Id);
       Check_References (Spec_Id);
       Process_End_Label (N, 't', Ref_Id);
+      Update_Use_Clause_Chain;
       End_Scope;
 
       --  When a Lock_Free aspect specification/pragma forces the lock-free
@@ -1873,7 +1902,9 @@ package body Sem_Ch9 is
       --  composite types with inner components, we traverse recursively
       --  the private components of the protected type, and indicate that
       --  all itypes within are frozen. This ensures that no freeze nodes
-      --  will be generated for them.
+      --  will be generated for them. In the case of itypes that are access
+      --  types we need to complete their representation by calling layout,
+      --  which would otherwise be invoked when freezing a type.
       --
       --  On the other hand, components of the corresponding record are
       --  frozen (or receive itype references) as for other records.
@@ -1900,6 +1931,10 @@ package body Sem_Ch9 is
             then
                Set_Has_Delayed_Freeze (Comp, False);
                Set_Is_Frozen (Comp);
+
+               if Is_Access_Type (Comp) then
+                  Layout_Type (Comp);
+               end if;
 
                if Is_Record_Type (Comp)
                  or else Is_Protected_Type (Comp)
@@ -1937,16 +1972,8 @@ package body Sem_Ch9 is
       while Present (E) loop
          if Ekind_In (E, E_Function, E_Procedure) then
             Set_Convention (E, Convention_Protected);
-
-         elsif Is_Task_Type (Etype (E))
-           or else Has_Task (Etype (E))
-         then
-            Set_Has_Task (Current_Scope);
-
-         elsif Is_Protected_Type (Etype (E))
-           or else Has_Protected (Etype (E))
-         then
-            Set_Has_Protected (Current_Scope);
+         else
+            Propagate_Concurrent_Flags (Current_Scope, Etype (E));
          end if;
 
          Next_Entity (E);
@@ -1992,12 +2019,28 @@ package body Sem_Ch9 is
       end if;
 
       Set_Ekind              (T, E_Protected_Type);
-      Set_Is_First_Subtype   (T, True);
-      Set_Has_Protected      (T, True);
+      Set_Is_First_Subtype   (T);
       Init_Size_Align        (T);
       Set_Etype              (T, T);
-      Set_Has_Delayed_Freeze (T, True);
+      Set_Has_Delayed_Freeze (T);
       Set_Stored_Constraint  (T, No_Elist);
+
+      --  Mark this type as a protected type for the sake of restrictions,
+      --  unless the protected type is declared in a private part of a package
+      --  of the runtime. With this exception, the Suspension_Object from
+      --  Ada.Synchronous_Task_Control can be implemented using a protected
+      --  object without triggering violations of No_Local_Protected_Objects
+      --  when the user locally declares such an object. This may look like a
+      --  trick, but the user doesn't have to know how Suspension_Object is
+      --  implemented.
+
+      if In_Private_Part (Current_Scope)
+        and then Is_Internal_Unit (Current_Sem_Unit)
+      then
+         Set_Has_Protected (T, False);
+      else
+         Set_Has_Protected (T);
+      end if;
 
       --  Set the SPARK_Mode from the current context (may be overwritten later
       --  with an explicit pragma).
@@ -2027,11 +2070,21 @@ package body Sem_Ch9 is
 
       Set_Is_Constrained (T, not Has_Discriminants (T));
 
-      --  If aspects are present, analyze them now. They can make references
-      --  to the discriminants of the type, but not to any components.
+      --  If aspects are present, analyze them now. They can make references to
+      --  the discriminants of the type, but not to any components.
 
       if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, Def_Id);
+
+         --  The protected type is the full view of a private type. Analyze the
+         --  aspects with the entity of the private type to ensure that after
+         --  both views are exchanged, the aspect are actually associated with
+         --  the full view.
+
+         if T /= Def_Id and then Is_Private_Type (Def_Id) then
+            Analyze_Aspect_Specifications (N, T);
+         else
+            Analyze_Aspect_Specifications (N, Def_Id);
+         end if;
       end if;
 
       Analyze (Protected_Definition (N));
@@ -2064,6 +2117,7 @@ package body Sem_Ch9 is
 
       if (Abort_Allowed or else Restriction_Active (No_Entry_Queue) = False
            or else Number_Entries (T) > 1)
+        and then not Restricted_Profile
         and then
           (Has_Entries (T)
             or else Has_Interrupt_Handler (T)
@@ -2184,6 +2238,16 @@ package body Sem_Ch9 is
             Set_Must_Have_Preelab_Init (T);
          end if;
 
+         --  Propagate Default_Initial_Condition-related attributes from the
+         --  private type to the protected type.
+
+         Propagate_DIC_Attributes (T, From_Typ => Def_Id);
+
+         --  Propagate invariant-related attributes from the private type to
+         --  the protected type.
+
+         Propagate_Invariant_Attributes (T, From_Typ => Def_Id);
+
          --  Create corresponding record now, because some private dependents
          --  may be subtypes of the partial view.
 
@@ -2198,6 +2262,14 @@ package body Sem_Ch9 is
             Expand_N_Protected_Type_Declaration (N);
             Process_Full_View (N, T, Def_Id);
          end if;
+      end if;
+
+      --  In GNATprove mode, force the loading of a Interrupt_Priority, which
+      --  is required for the ceiling priority protocol checks triggered by
+      --  calls originating from protected subprograms and entries.
+
+      if GNATprove_Mode then
+         SPARK_Implicit_Load (RE_Interrupt_Priority);
       end if;
    end Analyze_Protected_Type_Declaration;
 
@@ -2216,9 +2288,19 @@ package body Sem_Ch9 is
       Target_Obj  : Node_Id := Empty;
       Req_Scope   : Entity_Id;
       Outer_Ent   : Entity_Id;
-      Synch_Type  : Entity_Id;
+      Synch_Type  : Entity_Id := Empty;
 
    begin
+      --  Preserve relevant elaboration-related attributes of the context which
+      --  are no longer available or very expensive to recompute once analysis,
+      --  resolution, and expansion are over.
+
+      Mark_Elaboration_Attributes
+        (N_Id     => N,
+         Checks   => True,
+         Modes    => True,
+         Warnings => True);
+
       Tasking_Used := True;
       Check_SPARK_05_Restriction ("requeue statement is not allowed", N);
       Check_Restriction (No_Requeue_Statements, N);
@@ -2276,7 +2358,7 @@ package body Sem_Ch9 is
          if Object_Access_Level (Target_Obj) >= Scope_Depth (Outer_Ent)
            and then
              (not Is_Entity_Name (Target_Obj)
-               or else Ekind (Entity (Target_Obj)) not in Formal_Kind
+               or else not Is_Formal (Entity (Target_Obj))
                or else Enclosing /= Scope (Entity (Target_Obj)))
          then
             Error_Msg_N
@@ -2491,6 +2573,12 @@ package body Sem_Ch9 is
          Error_Msg_N
            ("target protected object of requeue must be a variable", N);
       end if;
+
+      --  A requeue statement is treated as a call for purposes of ABE checks
+      --  and diagnostics. Annotate the tree by creating a call marker in case
+      --  the requeue statement is transformed by expansion.
+
+      Build_Call_Marker (N);
    end Analyze_Requeue;
 
    ------------------------------
@@ -2685,7 +2773,6 @@ package body Sem_Ch9 is
       Enter_Name (Obj_Id);
       Set_Ekind                  (Obj_Id, E_Variable);
       Set_Etype                  (Obj_Id, Typ);
-      Set_Part_Of_Constituents   (Obj_Id, New_Elmt_List);
       Set_SPARK_Pragma           (Obj_Id, SPARK_Mode_Pragma);
       Set_SPARK_Pragma_Inherited (Obj_Id);
 
@@ -2714,7 +2801,7 @@ package body Sem_Ch9 is
       Generate_Definition (Obj_Id);
       Tasking_Used := True;
 
-      --  A single task declaration is transformed into a pait of an anonymous
+      --  A single task declaration is transformed into a pair of an anonymous
       --  task type and an object of that type. Generate:
 
       --    task type Typ is ...;
@@ -2772,9 +2859,17 @@ package body Sem_Ch9 is
       Enter_Name (Obj_Id);
       Set_Ekind                  (Obj_Id, E_Variable);
       Set_Etype                  (Obj_Id, Typ);
-      Set_Part_Of_Constituents   (Obj_Id, New_Elmt_List);
       Set_SPARK_Pragma           (Obj_Id, SPARK_Mode_Pragma);
       Set_SPARK_Pragma_Inherited (Obj_Id);
+
+      --  Preserve relevant elaboration-related attributes of the context which
+      --  are no longer available or very expensive to recompute once analysis,
+      --  resolution, and expansion are over.
+
+      Mark_Elaboration_Attributes
+        (N_Id     => Obj_Id,
+         Checks   => True,
+         Warnings => True);
 
       --  Instead of calling Analyze on the new node, call the proper analysis
       --  procedure directly. Otherwise the node would be expanded twice, with
@@ -2808,13 +2903,13 @@ package body Sem_Ch9 is
       --  a single task, since Spec_Id is set to the task type).
 
    begin
-      --  A task body "freezes" the contract of the nearest enclosing package
+      --  A task body freezes the contract of the nearest enclosing package
       --  body and all other contracts encountered in the same declarative part
       --  up to and excluding the task body. This ensures that annotations
       --  referenced by the contract of an entry or subprogram body declared
       --  within the current protected body are available.
 
-      Analyze_Previous_Contracts (N);
+      Freeze_Previous_Contracts (N);
 
       Tasking_Used := True;
       Set_Scope (Body_Id, Current_Scope);
@@ -2933,6 +3028,7 @@ package body Sem_Ch9 is
       end;
 
       Process_End_Label (HSS, 't', Ref_Id);
+      Update_Use_Clause_Chain;
       End_Scope;
    end Analyze_Task_Body;
 
@@ -3038,6 +3134,15 @@ package body Sem_Ch9 is
       Set_SPARK_Pragma_Inherited     (T);
       Set_SPARK_Aux_Pragma_Inherited (T);
 
+      --  Preserve relevant elaboration-related attributes of the context which
+      --  are no longer available or very expensive to recompute once analysis,
+      --  resolution, and expansion are over.
+
+      Mark_Elaboration_Attributes
+        (N_Id     => T,
+         Checks   => True,
+         Warnings => True);
+
       Push_Scope (T);
 
       if Ada_Version >= Ada_2005 then
@@ -3063,7 +3168,17 @@ package body Sem_Ch9 is
       Set_Is_Constrained (T, not Has_Discriminants (T));
 
       if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, Def_Id);
+
+         --  The task type is the full view of a private type. Analyze the
+         --  aspects with the entity of the private type to ensure that after
+         --  both views are exchanged, the aspect are actually associated with
+         --  the full view.
+
+         if T /= Def_Id and then Is_Private_Type (Def_Id) then
+            Analyze_Aspect_Specifications (N, T);
+         else
+            Analyze_Aspect_Specifications (N, Def_Id);
+         end if;
       end if;
 
       if Present (Task_Definition (N)) then
@@ -3077,6 +3192,7 @@ package body Sem_Ch9 is
       if Restriction_Check_Required (No_Task_Hierarchy)
         and then not Is_Library_Level_Entity (T)
         and then Comes_From_Source (T)
+        and then not CodePeer_Mode
       then
          Error_Msg_Sloc := Restrictions_Loc (No_Task_Hierarchy);
 
@@ -3093,9 +3209,8 @@ package body Sem_Ch9 is
 
       --  Case of a completion of a private declaration
 
-      if T /= Def_Id
-        and then Is_Private_Type (Def_Id)
-      then
+      if T /= Def_Id and then Is_Private_Type (Def_Id) then
+
          --  Deal with preelaborable initialization. Note that this processing
          --  is done by Process_Full_View, but as can be seen below, in this
          --  case the call to Process_Full_View is skipped if any serious
@@ -3104,6 +3219,16 @@ package body Sem_Ch9 is
          if Known_To_Have_Preelab_Init (Def_Id) then
             Set_Must_Have_Preelab_Init (T);
          end if;
+
+         --  Propagate Default_Initial_Condition-related attributes from the
+         --  private type to the task type.
+
+         Propagate_DIC_Attributes (T, From_Typ => Def_Id);
+
+         --  Propagate invariant-related attributes from the private type to
+         --  task type.
+
+         Propagate_Invariant_Attributes (T, From_Typ => Def_Id);
 
          --  Create corresponding record now, because some private dependents
          --  may be subtypes of the partial view.
@@ -3119,6 +3244,14 @@ package body Sem_Ch9 is
             Expand_N_Task_Type_Declaration (N);
             Process_Full_View (N, T, Def_Id);
          end if;
+      end if;
+
+      --  In GNATprove mode, force the loading of a Interrupt_Priority, which
+      --  is required for the ceiling priority protocol checks triggered by
+      --  calls originating from tasks.
+
+      if GNATprove_Mode then
+         SPARK_Implicit_Load (RE_Interrupt_Priority);
       end if;
    end Analyze_Task_Type_Declaration;
 
@@ -3384,10 +3517,10 @@ package body Sem_Ch9 is
       --  declarations. Search for the private type declaration.
 
       declare
-         Full_T_Ifaces : Elist_Id;
+         Full_T_Ifaces : Elist_Id := No_Elist;
          Iface         : Node_Id;
          Priv_T        : Entity_Id;
-         Priv_T_Ifaces : Elist_Id;
+         Priv_T_Ifaces : Elist_Id := No_Elist;
 
       begin
          Priv_T := First_Entity (Scope (T));

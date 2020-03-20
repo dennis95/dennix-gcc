@@ -1,5 +1,6 @@
 // PR c++/67117
-// { dg-options "-std=c++1z -fconcepts" }
+// { dg-do compile { target c++17 } }
+// { dg-options "-fconcepts" }
 
 template <class T>
   requires false
@@ -13,4 +14,4 @@ template <class T>
 constexpr bool f() { return false; }
 
 static_assert(f<void>());
-static_assert(v<void>);		// { dg-error "constraints" }
+static_assert(v<void>);		// { dg-error "invalid" }

@@ -1,5 +1,5 @@
 /* Target Code for ft32
-   Copyright (C) 2015-2016 Free Software Foundation, Inc.
+   Copyright (C) 2015-2019 Free Software Foundation, Inc.
    Contributed by FTDI <support@ftdi.com>
 
    This file is part of GCC.
@@ -18,6 +18,8 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -25,7 +27,10 @@
 #include "target.h"
 #include "rtl.h"
 #include "tree.h"
+#include "stringpool.h"
+#include "attribs.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "regs.h"
 #include "emit-rtl.h"
@@ -35,6 +40,7 @@
 #include "calls.h"
 #include "expr.h"
 #include "builtins.h"
+#include "print-tree.h"
 
 /* This file should be included last.  */
 #include "target-def.h"
@@ -77,7 +83,7 @@ ft32_function_value (const_tree valtype,
    We always return values in register $r0 for ft32.  */
 
 static rtx
-ft32_libcall_value (enum machine_mode mode, const_rtx fun ATTRIBUTE_UNUSED)
+ft32_libcall_value (machine_mode mode, const_rtx fun ATTRIBUTE_UNUSED)
 {
   return gen_rtx_REG (mode, FT32_R0);
 }
@@ -172,7 +178,7 @@ ft32_print_operand (FILE * file, rtx x, int code)
 
     case 'h':
       if (GET_CODE (operand) != REG)
-        internal_error ("'h' applied to non-register operand");
+	internal_error ("%<h%> applied to non-register operand");
       fprintf (file, "%s", reg_names[REGNO (operand) + 1]);
       return;
 
@@ -259,12 +265,12 @@ ft32_load_immediate (rtx dst, int32_t i)
 {
   char pattern[100];
 
-  if ((-524288 <= i) && (i <= 524287))
+  if (i >= -524288 && i <= 524287)
     {
       sprintf (pattern, "ldk.l  %%0,%d", i);
       output_asm_insn (pattern, &dst);
     }
-  else if ((-536870912 <= i) && (i <= 536870911))
+  else if (i >= -536870912 && i <= 536870911)
     {
       ft32_load_immediate (dst, i >> 10);
       sprintf (pattern, "ldl.l  %%0,%%0,%d", i & 1023);
@@ -277,7 +283,7 @@ ft32_load_immediate (rtx dst, int32_t i)
       for (rd = 1; rd < 32; rd++)
         {
           u = ((u >> 31) & 1) | (u << 1);
-          if ((-524288 <= (int32_t) u) && ((int32_t) u <= 524287))
+	  if ((int32_t) u >= -524288 && (int32_t) u <= 524287)
             {
               ft32_load_immediate (dst, (int32_t) u);
               sprintf (pattern, "ror.l  %%0,%%0,%d", rd);
@@ -409,9 +415,10 @@ ft32_compute_frame (void)
       cfun->machine->callee_saved_reg_size += 4;
 
   cfun->machine->size_for_adjusting_sp =
-    crtl->args.pretend_args_size
+    0 // crtl->args.pretend_args_size
     + cfun->machine->local_vars_size
-    + (ACCUMULATE_OUTGOING_ARGS ? crtl->outgoing_args_size : 0);
+    + (ACCUMULATE_OUTGOING_ARGS
+       ? (HOST_WIDE_INT) crtl->outgoing_args_size : 0);
 }
 
 // Must use LINK/UNLINK when...
@@ -434,15 +441,32 @@ ft32_expand_prologue (void)
 
   ft32_compute_frame ();
 
+  int args_to_push = crtl->args.pretend_args_size;
+  if (args_to_push)
+    {
+      int i;
+
+      insn = emit_insn (gen_movsi_pop ((gen_rtx_REG (Pmode, FT32_R29))));
+
+      for (i = 0; i < (args_to_push / 4); i++)
+	{
+	  insn =
+	    emit_insn (gen_movsi_push ((gen_rtx_REG (Pmode, FT32_R5 - i))));
+	  RTX_FRAME_RELATED_P (insn) = 1;
+	}
+
+      insn = emit_insn (gen_movsi_push ((gen_rtx_REG (Pmode, FT32_R29))));
+    }
+
   if (flag_stack_usage_info)
     current_function_static_stack_size = cfun->machine->size_for_adjusting_sp;
 
   if (!must_link () && (cfun->machine->callee_saved_reg_size == 4))
     {
       insn =
-        emit_insn (gen_link
-                   (gen_rtx_REG (Pmode, FT32_R13),
-                    GEN_INT (-cfun->machine->size_for_adjusting_sp)));
+	emit_insn (gen_link
+		   (gen_rtx_REG (Pmode, FT32_R13),
+		    GEN_INT (-cfun->machine->size_for_adjusting_sp)));
       RTX_FRAME_RELATED_P (insn) = 1;
       return;
     }
@@ -450,30 +474,30 @@ ft32_expand_prologue (void)
   if (optimize_size)
     {
       for (regno = FIRST_PSEUDO_REGISTER; regno-- > 0;)
-        {
-          if (!fixed_regs[regno] && !call_used_regs[regno]
-              && df_regs_ever_live_p (regno))
-            {
-              rtx preg = gen_rtx_REG (Pmode, regno);
-              emit_insn (gen_call_prolog (preg));
-              break;
-            }
-        }
+	{
+	  if (!fixed_regs[regno] && !call_used_regs[regno]
+	      && df_regs_ever_live_p (regno))
+	    {
+	      rtx preg = gen_rtx_REG (Pmode, regno);
+	      emit_insn (gen_call_prolog (preg));
+	      break;
+	    }
+	}
     }
   else
     {
       for (regno = 0; regno < FIRST_PSEUDO_REGISTER; regno++)
-        {
-          if (!fixed_regs[regno] && df_regs_ever_live_p (regno)
-              && !call_used_regs[regno])
-            {
-              insn = emit_insn (gen_movsi_push (gen_rtx_REG (Pmode, regno)));
-              RTX_FRAME_RELATED_P (insn) = 1;
-            }
-        }
+	{
+	  if (!fixed_regs[regno] && df_regs_ever_live_p (regno)
+	      && !call_used_regs[regno])
+	    {
+	      insn = emit_insn (gen_movsi_push (gen_rtx_REG (Pmode, regno)));
+	      RTX_FRAME_RELATED_P (insn) = 1;
+	    }
+	}
     }
 
-  if (65536 <= cfun->machine->size_for_adjusting_sp)
+  if (cfun->machine->size_for_adjusting_sp >= 65536)
     {
       error ("stack frame must be smaller than 64K");
       return;
@@ -481,17 +505,17 @@ ft32_expand_prologue (void)
   if (must_link ())
     {
       insn =
-        emit_insn (gen_link
-                   (gen_rtx_REG (Pmode, FT32_FP),
-                    GEN_INT (-cfun->machine->size_for_adjusting_sp)));
+	emit_insn (gen_link
+		   (gen_rtx_REG (Pmode, FT32_FP),
+		    GEN_INT (-cfun->machine->size_for_adjusting_sp)));
       RTX_FRAME_RELATED_P (insn) = 1;
     }
   else if (cfun->machine->size_for_adjusting_sp > 0)
     {
+      int adj = cfun->machine->size_for_adjusting_sp;
       insn = emit_insn (gen_addsi3 (gen_rtx_REG (SImode, FT32_SP),
-                                    gen_rtx_REG (SImode, FT32_SP),
-                                    GEN_INT (-(cfun->machine->
-                                               size_for_adjusting_sp))));
+				    gen_rtx_REG (SImode, FT32_SP),
+				    GEN_INT (-adj)));
       RTX_FRAME_RELATED_P (insn) = 1;
     }
 }
@@ -500,6 +524,7 @@ void
 ft32_expand_epilogue (void)
 {
   int regno;
+  int pretend = crtl->args.pretend_args_size;
 
   if (!must_link ()
       && (cfun->machine->size_for_adjusting_sp == 24)
@@ -533,7 +558,7 @@ ft32_expand_epilogue (void)
               && df_regs_ever_live_p (regno))
             {
               rtx preg = gen_rtx_REG (Pmode, regno);
-              if (optimize_size)
+              if (optimize_size && (pretend == 0))
                 {
                   if (epilog24)
                     emit_insn (gen_jump_epilog24 (preg));
@@ -546,7 +571,10 @@ ft32_expand_epilogue (void)
         }
     }
 
-  emit_jump_insn (gen_returner ());
+  if (pretend != 0)
+    emit_jump_insn (gen_pretend_returner (GEN_INT (pretend)));
+  else
+    emit_jump_insn (gen_returner ());
 }
 
 #undef TARGET_FRAME_POINTER_REQUIRED
@@ -602,30 +630,19 @@ ft32_initial_elimination_offset (int from, int to)
 
 static void
 ft32_setup_incoming_varargs (cumulative_args_t cum_v,
-                             enum machine_mode mode ATTRIBUTE_UNUSED,
-                             tree type ATTRIBUTE_UNUSED,
-                             int *pretend_size, int no_rtl)
+			     machine_mode mode,
+			     tree type ATTRIBUTE_UNUSED,
+			     int *pretend_size, int no_rtl ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
-  int regno;
-  int regs = 8 - *cum;
+  int named_size =
+    GET_MODE_SIZE (SImode) * (*cum - FT32_R0) + GET_MODE_SIZE (mode);
 
-  *pretend_size = regs < 0 ? 0 : GET_MODE_SIZE (SImode) * regs;
-
-  if (no_rtl)
-    return;
-
-  for (regno = *cum; regno < 8; regno++)
-    {
-      rtx reg = gen_rtx_REG (SImode, regno);
-      rtx slot = gen_rtx_PLUS (Pmode,
-                               gen_rtx_REG (SImode, ARG_POINTER_REGNUM),
-                               GEN_INT (UNITS_PER_WORD * (regno - FT32_R0)));
-
-      emit_move_insn (gen_rtx_MEM (SImode, slot), reg);
-    }
+  if (named_size < 24)
+    *pretend_size = 24 - named_size;
+  else
+    *pretend_size = 0;
 }
-
 
 /* Return the fixed registers used for condition codes.  */
 
@@ -641,7 +658,7 @@ ft32_fixed_condition_code_regs (unsigned int *p1, unsigned int *p2)
    NULL_RTX if there's no more space.  */
 
 static rtx
-ft32_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
+ft32_function_arg (cumulative_args_t cum_v, machine_mode mode,
                    const_tree type ATTRIBUTE_UNUSED,
                    bool named ATTRIBUTE_UNUSED)
 {
@@ -658,7 +675,7 @@ ft32_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
    : (unsigned) int_size_in_bytes (TYPE))
 
 static void
-ft32_function_arg_advance (cumulative_args_t cum_v, enum machine_mode mode,
+ft32_function_arg_advance (cumulative_args_t cum_v, machine_mode mode,
                            const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -672,7 +689,7 @@ ft32_function_arg_advance (cumulative_args_t cum_v, enum machine_mode mode,
 
 static bool
 ft32_pass_by_reference (cumulative_args_t cum ATTRIBUTE_UNUSED,
-                        enum machine_mode mode, const_tree type,
+                        machine_mode mode, const_tree type,
                         bool named ATTRIBUTE_UNUSED)
 {
   unsigned HOST_WIDE_INT size;
@@ -695,7 +712,7 @@ ft32_pass_by_reference (cumulative_args_t cum ATTRIBUTE_UNUSED,
 
 static int
 ft32_arg_partial_bytes (cumulative_args_t cum_v,
-                        enum machine_mode mode, tree type, bool named)
+                        machine_mode mode, tree type, bool named)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
   int bytes_left, size;
@@ -778,7 +795,7 @@ ft32_is_mem_pm (rtx o)
 #undef TARGET_VALID_POINTER_MODE
 #define TARGET_VALID_POINTER_MODE ft32_valid_pointer_mode
 static bool
-ft32_valid_pointer_mode (enum machine_mode mode)
+ft32_valid_pointer_mode (scalar_int_mode mode)
 {
   if (mode == SImode)
     return 1;
@@ -787,7 +804,7 @@ ft32_valid_pointer_mode (enum machine_mode mode)
 
 #undef TARGET_ADDR_SPACE_POINTER_MODE
 #define TARGET_ADDR_SPACE_POINTER_MODE ft32_addr_space_pointer_mode
-static enum machine_mode
+static scalar_int_mode
 ft32_addr_space_pointer_mode (addr_space_t addrspace ATTRIBUTE_UNUSED)
 {
   return Pmode;
@@ -795,7 +812,7 @@ ft32_addr_space_pointer_mode (addr_space_t addrspace ATTRIBUTE_UNUSED)
 
 #undef TARGET_ADDR_SPACE_ADDRESS_MODE
 #define TARGET_ADDR_SPACE_ADDRESS_MODE ft32_addr_space_address_mode
-static enum machine_mode
+static scalar_int_mode
 ft32_addr_space_address_mode (addr_space_t addrspace ATTRIBUTE_UNUSED)
 {
   return Pmode;
@@ -849,10 +866,11 @@ reg_ok_for_base_p (rtx r, bool strict)
 }
 
 static bool
-ft32_addr_space_legitimate_address_p (enum machine_mode mode, rtx x,
-                                      bool strict,
+ft32_addr_space_legitimate_address_p (machine_mode mode, rtx x, bool strict,
                                       addr_space_t as ATTRIBUTE_UNUSED)
 {
+  int max_offset = TARGET_FT32B ? 16384 : 128;
+
   if (mode != BLKmode)
     {
       if (GET_CODE (x) == PLUS)
@@ -862,8 +880,9 @@ ft32_addr_space_legitimate_address_p (enum machine_mode mode, rtx x,
           op2 = XEXP (x, 1);
           if (GET_CODE (op1) == REG
               && CONST_INT_P (op2)
-              && INTVAL (op2) >= -128
-              && INTVAL (op2) < 128 && reg_ok_for_base_p (op1, strict))
+              && (-max_offset <= INTVAL (op2))
+              && (INTVAL (op2) < max_offset)
+              && reg_ok_for_base_p (op1, strict))
             goto yes;
           if (GET_CODE (op1) == SYMBOL_REF && CONST_INT_P (op2))
             goto yes;
@@ -884,6 +903,51 @@ ft32_addr_space_legitimate_address_p (enum machine_mode mode, rtx x,
 yes:
   return 1;
 }
+
+#undef TARGET_ENCODE_SECTION_INFO
+#define TARGET_ENCODE_SECTION_INFO  ft32_elf_encode_section_info
+
+void
+ft32_elf_encode_section_info (tree decl, rtx rtl, int first)
+{
+  enum tree_code code;
+  rtx symbol;
+
+  /* Careful not to prod global register variables.  */
+  if (!MEM_P (rtl))
+    return;
+  symbol = XEXP (rtl, 0);
+  if (GET_CODE (symbol) != SYMBOL_REF)
+    return;
+
+  default_encode_section_info (decl, rtl, first);
+
+  code = TREE_CODE (decl);
+  switch (TREE_CODE_CLASS (code))
+    {
+    case tcc_declaration:
+      {
+	tree type = TREE_TYPE (decl);
+	int is_flash = (type && TYPE_P (type)
+			&& !ADDR_SPACE_GENERIC_P (TYPE_ADDR_SPACE (type)));
+	if ((code == VAR_DECL) && !is_flash)
+	  SYMBOL_REF_FLAGS (symbol) |= 0x1000;
+      }
+      break;
+
+    case tcc_constant:
+    case tcc_exceptional:
+      if (code == STRING_CST)
+	SYMBOL_REF_FLAGS (symbol) |= 0x1000;
+      break;
+
+    default:
+      break;
+    }
+}
+
+#undef TARGET_CONSTANT_ALIGNMENT
+#define TARGET_CONSTANT_ALIGNMENT constant_alignment_word_strings
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

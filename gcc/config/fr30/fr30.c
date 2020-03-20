@@ -1,5 +1,5 @@
 /* FR30 specific functions.
-   Copyright (C) 1998-2016 Free Software Foundation, Inc.
+   Copyright (C) 1998-2019 Free Software Foundation, Inc.
    Contributed by Cygnus Solutions.
 
    This file is part of GCC.
@@ -20,6 +20,8 @@
 
 /*{{{  Includes */ 
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -27,7 +29,10 @@
 #include "target.h"
 #include "rtl.h"
 #include "tree.h"
+#include "stringpool.h"
+#include "attribs.h"
 #include "df.h"
+#include "memmodel.h"
 #include "emit-rtl.h"
 #include "stor-layout.h"
 #include "varasm.h"
@@ -179,10 +184,19 @@ static int fr30_num_arg_regs (machine_mode, const_tree);
 #undef TARGET_CAN_ELIMINATE
 #define TARGET_CAN_ELIMINATE fr30_can_eliminate
 
+#undef TARGET_LRA_P
+#define TARGET_LRA_P hook_bool_void_false
+
 #undef TARGET_ASM_TRAMPOLINE_TEMPLATE
 #define TARGET_ASM_TRAMPOLINE_TEMPLATE fr30_asm_trampoline_template
 #undef TARGET_TRAMPOLINE_INIT
 #define TARGET_TRAMPOLINE_INIT fr30_trampoline_init
+
+#undef TARGET_CONSTANT_ALIGNMENT
+#define TARGET_CONSTANT_ALIGNMENT constant_alignment_word_strings
+
+#undef  TARGET_HAVE_SPECULATION_SAFE_VALUE
+#define TARGET_HAVE_SPECULATION_SAFE_VALUE speculation_safe_value_not_needed
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 
@@ -684,7 +698,8 @@ fr30_print_operand (FILE *file, rtx x, int code)
 	  break;
 	}
 
-      /* Fall through.  Let output_addr_const deal with it.  */
+      /* FALLTHRU */
+      /* Let output_addr_const deal with it.  */
     default:
       output_addr_const (file, x);
       break;

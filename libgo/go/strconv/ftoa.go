@@ -23,7 +23,7 @@ var float32info = floatInfo{23, 8, -127}
 var float64info = floatInfo{52, 11, -1023}
 
 // FormatFloat converts the floating-point number f to a string,
-// according to the format fmt and precision prec.  It rounds the
+// according to the format fmt and precision prec. It rounds the
 // result assuming that the original was obtained from a floating-point
 // value of bitSize bits (32 for float32, 64 for float64).
 //
@@ -35,10 +35,11 @@ var float64info = floatInfo{52, 11, -1023}
 // 'g' ('e' for large exponents, 'f' otherwise), or
 // 'G' ('E' for large exponents, 'f' otherwise).
 //
-// The precision prec controls the number of digits
-// (excluding the exponent) printed by the 'e', 'E', 'f', 'g', and 'G' formats.
+// The precision prec controls the number of digits (excluding the exponent)
+// printed by the 'e', 'E', 'f', 'g', and 'G' formats.
 // For 'e', 'E', and 'f' it is the number of digits after the decimal point.
-// For 'g' and 'G' it is the total number of digits.
+// For 'g' and 'G' it is the maximum number of significant digits (trailing
+// zeros are removed).
 // The special precision -1 uses the smallest number of digits
 // necessary such that ParseFloat will return f exactly.
 func FormatFloat(f float64, fmt byte, prec, bitSize int) string {

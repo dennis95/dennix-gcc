@@ -4,7 +4,7 @@
 
 struct A {
   int n;
-  char a [];
+  char a[];   // { dg-error "8:ISO C\\+\\+ forbids flexible array member" }
 };
 
 void f ()

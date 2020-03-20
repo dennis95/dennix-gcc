@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2016 Free Software Foundation, Inc.
+/* Copyright (C) 2007-2019 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -16,16 +16,19 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
 #include "target.h"
 #include "c-family/c-common.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "c-family/c-pragma.h"
 #include "stringpool.h"
 
-/* Output C specific EABI object attributes.  These can not be done in
+/* Output C specific EABI object attributes.  These cannot be done in
    arm.c because they require information from the C frontend.  */
 
 static void
@@ -71,26 +74,39 @@ arm_cpu_builtins (struct cpp_reader* pfile)
 
   def_or_undef_macro (pfile, "__ARM_FEATURE_QRDMX", TARGET_NEON_RDMA);
 
-  if (TARGET_CRC32)
-    builtin_define ("__ARM_FEATURE_CRC32");
-
+  def_or_undef_macro (pfile, "__ARM_FEATURE_CRC32", TARGET_CRC32);
+  def_or_undef_macro (pfile, "__ARM_FEATURE_DOTPROD", TARGET_DOTPROD);
+  def_or_undef_macro (pfile, "__ARM_FEATURE_COMPLEX", TARGET_COMPLEX);
   def_or_undef_macro (pfile, "__ARM_32BIT_STATE", TARGET_32BIT);
 
+  cpp_undef (pfile, "__ARM_FEATURE_CMSE");
+  if (arm_arch8 && !arm_arch_notm)
+    {
+      if (arm_arch_cmse && use_cmse)
+	builtin_define_with_int_value ("__ARM_FEATURE_CMSE", 3);
+      else
+	builtin_define ("__ARM_FEATURE_CMSE");
+    }
+
+  cpp_undef (pfile, "__ARM_FEATURE_LDREX");
   if (TARGET_ARM_FEATURE_LDREX)
     builtin_define_with_int_value ("__ARM_FEATURE_LDREX",
 				   TARGET_ARM_FEATURE_LDREX);
-  else
-    cpp_undef (pfile, "__ARM_FEATURE_LDREX");
 
   def_or_undef_macro (pfile, "__ARM_FEATURE_CLZ",
 		      ((TARGET_ARM_ARCH >= 5 && !TARGET_THUMB)
 		       || TARGET_ARM_ARCH_ISA_THUMB >=2));
+
+  def_or_undef_macro (pfile, "__ARM_FEATURE_NUMERIC_MAXMIN",
+		      TARGET_ARM_ARCH >= 8 && TARGET_NEON && TARGET_VFP5);
 
   def_or_undef_macro (pfile, "__ARM_FEATURE_SIMD32", TARGET_INT_SIMD);
 
   builtin_define_with_int_value ("__ARM_SIZEOF_MINIMAL_ENUM",
 				 flag_short_enums ? 1 : 4);
   builtin_define_type_sizeof ("__ARM_SIZEOF_WCHAR_T", wchar_type_node);
+
+  cpp_undef (pfile, "__ARM_ARCH_PROFILE");
   if (TARGET_ARM_ARCH_PROFILE)
     builtin_define_with_int_value ("__ARM_ARCH_PROFILE",
 				   TARGET_ARM_ARCH_PROFILE);
@@ -99,7 +115,10 @@ arm_cpu_builtins (struct cpp_reader* pfile)
      consistency with armcc.  */
   builtin_define ("__arm__");
   if (TARGET_ARM_ARCH)
-    builtin_define_with_int_value ("__ARM_ARCH", TARGET_ARM_ARCH);
+    {
+      cpp_undef (pfile, "__ARM_ARCH");
+      builtin_define_with_int_value ("__ARM_ARCH", TARGET_ARM_ARCH);
+    }
   if (arm_arch_notm)
     builtin_define ("__ARM_ARCH_ISA_ARM");
   builtin_define ("__APCS_32__");
@@ -111,6 +130,7 @@ arm_cpu_builtins (struct cpp_reader* pfile)
   else
     def_or_undef_macro (pfile, "__THUMBEL__", TARGET_THUMB);
 
+  cpp_undef (pfile, "__ARM_ARCH_ISA_THUMB");
   if (TARGET_ARM_ARCH_ISA_THUMB)
     builtin_define_with_int_value ("__ARM_ARCH_ISA_THUMB",
 				   TARGET_ARM_ARCH_ISA_THUMB);
@@ -128,26 +148,32 @@ arm_cpu_builtins (struct cpp_reader* pfile)
   if (TARGET_SOFT_FLOAT)
     builtin_define ("__SOFTFP__");
 
-  def_or_undef_macro (pfile, "__VFP_FP__", TARGET_VFP);
+  builtin_define ("__VFP_FP__");
 
+  cpp_undef (pfile, "__ARM_FP");
   if (TARGET_ARM_FP)
     builtin_define_with_int_value ("__ARM_FP", TARGET_ARM_FP);
-  else
-    cpp_undef (pfile, "__ARM_FP");
 
-  if (arm_fp16_format == ARM_FP16_FORMAT_IEEE)
-    builtin_define ("__ARM_FP16_FORMAT_IEEE");
-  if (arm_fp16_format == ARM_FP16_FORMAT_ALTERNATIVE)
-    builtin_define ("__ARM_FP16_FORMAT_ALTERNATIVE");
+  def_or_undef_macro (pfile, "__ARM_FP16_FORMAT_IEEE",
+		      arm_fp16_format == ARM_FP16_FORMAT_IEEE);
+  def_or_undef_macro (pfile, "__ARM_FP16_FORMAT_ALTERNATIVE",
+		      arm_fp16_format == ARM_FP16_FORMAT_ALTERNATIVE);
+  def_or_undef_macro (pfile, "__ARM_FP16_ARGS",
+		      arm_fp16_format != ARM_FP16_FORMAT_NONE);
+
+  def_or_undef_macro (pfile, "__ARM_FEATURE_FP16_SCALAR_ARITHMETIC",
+		      TARGET_VFP_FP16INST);
+  def_or_undef_macro (pfile, "__ARM_FEATURE_FP16_VECTOR_ARITHMETIC",
+		      TARGET_NEON_FP16INST);
+  def_or_undef_macro (pfile, "__ARM_FEATURE_FP16_FML", TARGET_FP16FML);
 
   def_or_undef_macro (pfile, "__ARM_FEATURE_FMA", TARGET_FMA);
   def_or_undef_macro (pfile, "__ARM_NEON__", TARGET_NEON);
   def_or_undef_macro (pfile, "__ARM_NEON", TARGET_NEON);
 
+  cpp_undef (pfile, "__ARM_NEON_FP");
   if (TARGET_NEON_FP)
     builtin_define_with_int_value ("__ARM_NEON_FP", TARGET_NEON_FP);
-  else
-    cpp_undef (pfile, "__ARM_NEON_FP");
 
   /* Add a define for interworking. Needed when building libgcc.a.  */
   if (arm_cpp_interwork)
@@ -181,6 +207,21 @@ arm_cpu_builtins (struct cpp_reader* pfile)
   def_or_undef_macro (pfile, "__ARM_FEATURE_IDIV", TARGET_IDIV);
 
   def_or_undef_macro (pfile, "__ARM_ASM_SYNTAX_UNIFIED__", inline_asm_unified);
+
+  cpp_undef (pfile, "__ARM_FEATURE_COPROC");
+  if (TARGET_32BIT && arm_arch4 && !(arm_arch8 && arm_arch_notm))
+    {
+      int coproc_level = 0x1;
+
+      if (arm_arch5t)
+	coproc_level |= 0x2;
+      if (arm_arch5te)
+	coproc_level |= 0x4;
+      if (arm_arch6)
+	coproc_level |= 0x8;
+
+      builtin_define_with_int_value ("__ARM_FEATURE_COPROC", coproc_level);
+    }
 }
 
 void
@@ -224,6 +265,9 @@ arm_pragma_target_parse (tree args, tree pop_target)
       /* handle_pragma_pop_options and handle_pragma_reset_options will set
        target_option_current_node, but not handle_pragma_target.  */
       target_option_current_node = cur_tree;
+      arm_configure_build_target (&arm_active_target,
+				  TREE_TARGET_OPTION (cur_tree),
+				  &global_options_set, false);
     }
 
   /* Update macros if target_node changes. The global state will be restored

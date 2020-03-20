@@ -1,5 +1,5 @@
 /* Integrated Register Allocator.  Changing code and generating moves.
-   Copyright (C) 2006-2016 Free Software Foundation, Inc.
+   Copyright (C) 2006-2019 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -75,6 +75,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "df.h"
 #include "insn-config.h"
 #include "regs.h"
+#include "memmodel.h"
 #include "ira.h"
 #include "ira-int.h"
 #include "cfgrtl.h"
@@ -782,7 +783,7 @@ modify_move_list (move_t list)
       to = move->to;
       if ((hard_regno = ALLOCNO_HARD_REGNO (to)) < 0)
 	continue;
-      nregs = hard_regno_nregs[hard_regno][ALLOCNO_MODE (to)];
+      nregs = hard_regno_nregs (hard_regno, ALLOCNO_MODE (to));
       for (i = 0; i < nregs; i++)
 	{
 	  hard_regno_last_set[hard_regno + i] = move;
@@ -795,7 +796,7 @@ modify_move_list (move_t list)
       to = move->to;
       if ((hard_regno = ALLOCNO_HARD_REGNO (from)) >= 0)
 	{
-	  nregs = hard_regno_nregs[hard_regno][ALLOCNO_MODE (from)];
+	  nregs = hard_regno_nregs (hard_regno, ALLOCNO_MODE (from));
 	  for (n = i = 0; i < nregs; i++)
 	    if (hard_regno_last_set_check[hard_regno + i] == curr_tick
 		&& (ALLOCNO_REGNO (hard_regno_last_set[hard_regno + i]->to)
@@ -833,7 +834,7 @@ modify_move_list (move_t list)
       to = move->to;
       if ((hard_regno = ALLOCNO_HARD_REGNO (from)) >= 0)
 	{
-	  nregs = hard_regno_nregs[hard_regno][ALLOCNO_MODE (from)];
+	  nregs = hard_regno_nregs (hard_regno, ALLOCNO_MODE (from));
 	  for (i = 0; i < nregs; i++)
 	    if (hard_regno_last_set_check[hard_regno + i] == curr_tick
 		&& ALLOCNO_HARD_REGNO
@@ -885,7 +886,7 @@ modify_move_list (move_t list)
 	}
       if ((hard_regno = ALLOCNO_HARD_REGNO (to)) < 0)
 	continue;
-      nregs = hard_regno_nregs[hard_regno][ALLOCNO_MODE (to)];
+      nregs = hard_regno_nregs (hard_regno, ALLOCNO_MODE (to));
       for (i = 0; i < nregs; i++)
 	{
 	  hard_regno_last_set[hard_regno + i] = move;

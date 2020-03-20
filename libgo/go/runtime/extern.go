@@ -27,6 +27,10 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	allocfreetrace: setting allocfreetrace=1 causes every allocation to be
 	profiled and a stack trace printed on each object's allocation and free.
 
+	clobberfree: setting clobberfree=1 causes the garbage collector to
+	clobber the memory content of an object with bad content when it frees
+	the object.
+
 	cgocheck: setting cgocheck=0 disables all checks for packages
 	using cgo to incorrectly pass Go pointers to non-Go code.
 	Setting cgocheck=1 (the default) enables relatively cheap
@@ -50,21 +54,13 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	gcshrinkstackoff: setting gcshrinkstackoff=1 disables moving goroutines
 	onto smaller stacks. In this mode, a goroutine's stack can only grow.
 
-	gcstackbarrieroff: setting gcstackbarrieroff=1 disables the use of stack barriers
-	that allow the garbage collector to avoid repeating a stack scan during the
-	mark termination phase.
-
-	gcstackbarrierall: setting gcstackbarrierall=1 installs stack barriers
-	in every stack frame, rather than in exponentially-spaced frames.
-
 	gcstoptheworld: setting gcstoptheworld=1 disables concurrent garbage collection,
 	making every garbage collection a stop-the-world event. Setting gcstoptheworld=2
 	also disables concurrent sweeping after the garbage collection finishes.
 
 	gctrace: setting gctrace=1 causes the garbage collector to emit a single line to standard
 	error at each collection, summarizing the amount of memory collected and the
-	length of the pause. Setting gctrace=2 emits the same summary but also
-	repeats each collection. The format of this line is subject to change.
+	length of the pause. The format of this line is subject to change.
 	Currently, it is:
 		gc # @#s #%: #+#+# ms clock, #+#/#/#+# ms cpu, #->#-># MB, # MB goal, # P
 	where the fields are as follows:
@@ -80,7 +76,27 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	for mark/scan are broken down in to assist time (GC performed in
 	line with allocation), background GC time, and idle GC time.
 	If the line ends with "(forced)", this GC was forced by a
-	runtime.GC() call and all phases are STW.
+	runtime.GC() call.
+
+	Setting gctrace to any value > 0 also causes the garbage collector
+	to emit a summary when memory is released back to the system.
+	This process of returning memory to the system is called scavenging.
+	The format of this summary is subject to change.
+	Currently it is:
+		scvg#: # MB released  printed only if non-zero
+		scvg#: inuse: # idle: # sys: # released: # consumed: # (MB)
+	where the fields are as follows:
+		scvg#        the scavenge cycle number, incremented at each scavenge
+		inuse: #     MB used or partially used spans
+		idle: #      MB spans pending scavenging
+		sys: #       MB mapped from the system
+		released: #  MB released to the system
+		consumed: #  MB allocated from the system
+
+	madvdontneed: setting madvdontneed=1 will use MADV_DONTNEED
+	instead of MADV_FREE on Linux when returning memory to the
+	kernel. This is less efficient, but causes RSS numbers to drop
+	more quickly.
 
 	memprofilerate: setting memprofilerate=X will update the value of runtime.MemProfileRate.
 	When set to 0 memory profiling is disabled.  Refer to the description of
@@ -103,7 +119,13 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	schedtrace: setting schedtrace=X causes the scheduler to emit a single line to standard
 	error every X milliseconds, summarizing the scheduler state.
 
-The net and net/http packages also refer to debugging variables in GODEBUG.
+	tracebackancestors: setting tracebackancestors=N extends tracebacks with the stacks at
+	which goroutines were created, where N limits the number of ancestor goroutines to
+	report. This also extends the information returned by runtime.Stack. Ancestor's goroutine
+	IDs will refer to the ID of the goroutine at the time of creation; it's possible for this
+	ID to be reused for another goroutine. Setting N to 0 will report no ancestry information.
+
+The net, net/http, and crypto/tls packages also refer to debugging variables in GODEBUG.
 See the documentation for those packages for details.
 
 The GOMAXPROCS variable limits the number of operating system threads that
@@ -142,136 +164,57 @@ of the run-time system.
 */
 package runtime
 
-// Gosched yields the processor, allowing other goroutines to run.  It does not
-// suspend the current goroutine, so execution resumes automatically.
-func Gosched()
-
-// Goexit terminates the goroutine that calls it.  No other goroutine is affected.
-// Goexit runs all deferred calls before terminating the goroutine.
-//
-// Calling Goexit from the main goroutine terminates that goroutine
-// without func main returning. Since func main has not returned,
-// the program continues execution of other goroutines.
-// If all other goroutines exit, the program crashes.
-func Goexit()
+import "runtime/internal/sys"
 
 // Caller reports file and line number information about function invocations on
-// the calling goroutine's stack.  The argument skip is the number of stack frames
+// the calling goroutine's stack. The argument skip is the number of stack frames
 // to ascend, with 0 identifying the caller of Caller.  (For historical reasons the
 // meaning of skip differs between Caller and Callers.) The return values report the
 // program counter, file name, and line number within the file of the corresponding
-// call.  The boolean ok is false if it was not possible to recover the information.
+// call. The boolean ok is false if it was not possible to recover the information.
 func Caller(skip int) (pc uintptr, file string, line int, ok bool)
 
-// Callers fills the slice pc with the program counters of function invocations
-// on the calling goroutine's stack.  The argument skip is the number of stack frames
+// Callers fills the slice pc with the return program counters of function invocations
+// on the calling goroutine's stack. The argument skip is the number of stack frames
 // to skip before recording in pc, with 0 identifying the frame for Callers itself and
 // 1 identifying the caller of Callers.
 // It returns the number of entries written to pc.
+//
+// To translate these PCs into symbolic information such as function
+// names and line numbers, use CallersFrames. CallersFrames accounts
+// for inlined functions and adjusts the return program counters into
+// call program counters. Iterating over the returned slice of PCs
+// directly is discouraged, as is using FuncForPC on any of the
+// returned PCs, since these cannot account for inlining or return
+// program counter adjustment.
 func Callers(skip int, pc []uintptr) int
 
-type Func struct {
-	opaque struct{} // unexported field to disallow conversions
-}
-
-// FuncForPC returns a *Func describing the function that contains the
-// given program counter address, or else nil.
-func FuncForPC(pc uintptr) *Func
-
-// Name returns the name of the function.
-func (f *Func) Name() string {
-	return funcname_go(f)
-}
-
-// Entry returns the entry address of the function.
-func (f *Func) Entry() uintptr {
-	return funcentry_go(f)
-}
-
-// FileLine returns the file name and line number of the
-// source code corresponding to the program counter pc.
-// The result will not be accurate if pc is not a program
-// counter within f.
-func (f *Func) FileLine(pc uintptr) (file string, line int) {
-	return funcline_go(f, pc)
-}
-
-// implemented in symtab.c
-func funcline_go(*Func, uintptr) (string, int)
-func funcname_go(*Func) string
-func funcentry_go(*Func) uintptr
-
-// SetFinalizer sets the finalizer associated with x to f.
-// When the garbage collector finds an unreachable block
-// with an associated finalizer, it clears the association and runs
-// f(x) in a separate goroutine.  This makes x reachable again, but
-// now without an associated finalizer.  Assuming that SetFinalizer
-// is not called again, the next time the garbage collector sees
-// that x is unreachable, it will free x.
-//
-// SetFinalizer(x, nil) clears any finalizer associated with x.
-//
-// The argument x must be a pointer to an object allocated by
-// calling new or by taking the address of a composite literal.
-// The argument f must be a function that takes a single argument
-// to which x's type can be assigned, and can have arbitrary ignored return
-// values. If either of these is not true, SetFinalizer aborts the
-// program.
-//
-// Finalizers are run in dependency order: if A points at B, both have
-// finalizers, and they are otherwise unreachable, only the finalizer
-// for A runs; once A is freed, the finalizer for B can run.
-// If a cyclic structure includes a block with a finalizer, that
-// cycle is not guaranteed to be garbage collected and the finalizer
-// is not guaranteed to run, because there is no ordering that
-// respects the dependencies.
-//
-// The finalizer for x is scheduled to run at some arbitrary time after
-// x becomes unreachable.
-// There is no guarantee that finalizers will run before a program exits,
-// so typically they are useful only for releasing non-memory resources
-// associated with an object during a long-running program.
-// For example, an os.File object could use a finalizer to close the
-// associated operating system file descriptor when a program discards
-// an os.File without calling Close, but it would be a mistake
-// to depend on a finalizer to flush an in-memory I/O buffer such as a
-// bufio.Writer, because the buffer would not be flushed at program exit.
-//
-// It is not guaranteed that a finalizer will run if the size of *x is
-// zero bytes.
-//
-// A single goroutine runs all finalizers for a program, sequentially.
-// If a finalizer must run for a long time, it should do so by starting
-// a new goroutine.
-func SetFinalizer(x, f interface{})
-
-func getgoroot() string
-
-// GOROOT returns the root of the Go tree.
-// It uses the GOROOT environment variable, if set,
+// GOROOT returns the root of the Go tree. It uses the
+// GOROOT environment variable, if set at process start,
 // or else the root used during the Go build.
 func GOROOT() string {
-	s := getgoroot()
+	s := gogetenv("GOROOT")
 	if s != "" {
 		return s
 	}
-	return defaultGoroot
+	return sys.DefaultGoroot
 }
 
 // Version returns the Go tree's version string.
 // It is either the commit hash and date at the time of the build or,
 // when possible, a release tag like "go1.3".
 func Version() string {
-	return theVersion
+	return sys.TheVersion
 }
 
 // GOOS is the running program's operating system target:
 // one of darwin, freebsd, linux, and so on.
-const GOOS string = theGoos
+// To view possible combinations of GOOS and GOARCH, run "go tool dist list".
+const GOOS string = sys.GOOS
 
 // GOARCH is the running program's architecture target:
-// 386, amd64, arm, arm64, ppc64, ppc64le.
-const GOARCH string = theGoarch
+// one of 386, amd64, arm, s390x, and so on.
+const GOARCH string = sys.GOARCH
 
 // GCCGOTOOLDIR is the Tool Dir for the gccgo build
-const GCCGOTOOLDIR string = theGccgoToolDir
+const GCCGOTOOLDIR string = sys.GccgoToolDir

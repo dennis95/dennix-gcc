@@ -1,5 +1,5 @@
 /* Software floating-point emulation. Common operations.
-   Copyright (C) 1997-2015 Free Software Foundation, Inc.
+   Copyright (C) 1997-2018 Free Software Foundation, Inc.
    This file is part of the GNU C Library.
    Contributed by Richard Henderson (rth@cygnus.com),
 		  Jakub Jelinek (jj@ultra.linux.cz),
@@ -898,6 +898,7 @@
 	case _FP_CLS_COMBINE (FP_CLS_NAN, FP_CLS_INF):		\
 	case _FP_CLS_COMBINE (FP_CLS_NAN, FP_CLS_ZERO):		\
 	  R##_s = X##_s;					\
+	  /* FALLTHRU */					\
 								\
 	case _FP_CLS_COMBINE (FP_CLS_INF, FP_CLS_INF):		\
 	case _FP_CLS_COMBINE (FP_CLS_INF, FP_CLS_NORMAL):	\
@@ -911,6 +912,7 @@
 	case _FP_CLS_COMBINE (FP_CLS_INF, FP_CLS_NAN):		\
 	case _FP_CLS_COMBINE (FP_CLS_ZERO, FP_CLS_NAN):		\
 	  R##_s = Y##_s;					\
+	  /* FALLTHRU */					\
 								\
 	case _FP_CLS_COMBINE (FP_CLS_NORMAL, FP_CLS_INF):	\
 	case _FP_CLS_COMBINE (FP_CLS_NORMAL, FP_CLS_ZERO):	\
@@ -1063,6 +1065,7 @@
 	case _FP_CLS_COMBINE (FP_CLS_NAN, FP_CLS_INF):			\
 	case _FP_CLS_COMBINE (FP_CLS_NAN, FP_CLS_ZERO):			\
 	  _FP_FMA_T##_s = X##_s;					\
+	  /* FALLTHRU */						\
 									\
 	case _FP_CLS_COMBINE (FP_CLS_INF, FP_CLS_INF):			\
 	case _FP_CLS_COMBINE (FP_CLS_INF, FP_CLS_NORMAL):		\
@@ -1076,6 +1079,7 @@
 	case _FP_CLS_COMBINE (FP_CLS_INF, FP_CLS_NAN):			\
 	case _FP_CLS_COMBINE (FP_CLS_ZERO, FP_CLS_NAN):			\
 	  _FP_FMA_T##_s = Y##_s;					\
+	  /* FALLTHRU */						\
 									\
 	case _FP_CLS_COMBINE (FP_CLS_NORMAL, FP_CLS_INF):		\
 	case _FP_CLS_COMBINE (FP_CLS_NORMAL, FP_CLS_ZERO):		\
@@ -1198,6 +1202,7 @@
 								\
 	case _FP_CLS_COMBINE (FP_CLS_NORMAL, FP_CLS_ZERO):	\
 	  FP_SET_EXCEPTION (FP_EX_DIVZERO);			\
+	  /* FALLTHRU */					\
 	case _FP_CLS_COMBINE (FP_CLS_INF, FP_CLS_ZERO):		\
 	case _FP_CLS_COMBINE (FP_CLS_INF, FP_CLS_NORMAL):	\
 	  R##_c = FP_CLS_INF;					\
@@ -2033,6 +2038,27 @@
 		}							\
 	    }								\
 	}								\
+    }									\
+  while (0)
+
+/* Truncate from a wider floating-point format to a narrower one.
+   Input and output are cooked.  */
+#define FP_TRUNC_COOKED(dfs, sfs, dwc, swc, D, S)			\
+  do									\
+    {									\
+      _FP_STATIC_ASSERT (_FP_FRACBITS_##sfs >= _FP_FRACBITS_##dfs,	\
+			 "destination mantissa wider than source");	\
+      if (S##_c == FP_CLS_NAN)						\
+	_FP_FRAC_SRL_##swc (S, (_FP_WFRACBITS_##sfs			\
+				- _FP_WFRACBITS_##dfs));		\
+      else								\
+	_FP_FRAC_SRS_##swc (S, (_FP_WFRACBITS_##sfs			\
+				- _FP_WFRACBITS_##dfs),			\
+			    _FP_WFRACBITS_##sfs);			\
+      _FP_FRAC_COPY_##dwc##_##swc (D, S);				\
+      D##_e = S##_e;							\
+      D##_c = S##_c;							\
+      D##_s = S##_s;							\
     }									\
   while (0)
 

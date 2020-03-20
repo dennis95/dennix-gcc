@@ -1,9 +1,9 @@
 /* { dg-do compile } */
-/* { dg-options "-O2 -fdump-tree-einline --param max-early-inliner-iterations=3" } */
+/* { dg-options "-O2 -fdump-tree-einline-optimized --param max-early-inliner-iterations=3" } */
 /* { dg-add-options bind_pic_locally } */
 
 namespace std {
-  extern "C" void puts(const char *s);
+  extern "C" int puts(const char *s);
 }
 
 template <class T, class E> void

@@ -1,6 +1,6 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
 <html>
-<!-- Copyright (C) 1988-2016 Free Software Foundation, Inc.
+<!-- Copyright (C) 1988-2019 Free Software Foundation, Inc.
 
 Permission is granted to copy, distribute and/or modify this document
 under the terms of the GNU Free Documentation License, Version 1.3 or
@@ -19,8 +19,9 @@ A GNU Manual
 You have freedom to copy and modify this GNU Manual, like GNU
      software.  Copies published by the Free Software Foundation raise
      funds for GNU development. -->
-<!-- Created by GNU Texinfo 5.2, http://www.gnu.org/software/texinfo/ -->
+<!-- Created by GNU Texinfo 6.5, http://www.gnu.org/software/texinfo/ -->
 <head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <title>Installing GCC</title>
 
 <meta name="description" content="Installing GCC">
@@ -28,20 +29,19 @@ You have freedom to copy and modify this GNU Manual, like GNU
 <meta name="resource-type" content="document">
 <meta name="distribution" content="global">
 <meta name="Generator" content="makeinfo">
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <style type="text/css">
 <!--
 a.summary-letter {text-decoration: none}
+blockquote.indentedblock {margin-right: 0em}
+blockquote.smallindentedblock {margin-right: 0em; font-size: smaller}
 blockquote.smallquotation {font-size: smaller}
 div.display {margin-left: 3.2em}
 div.example {margin-left: 3.2em}
-div.indentedblock {margin-left: 3.2em}
 div.lisp {margin-left: 3.2em}
 div.smalldisplay {margin-left: 3.2em}
 div.smallexample {margin-left: 3.2em}
-div.smallindentedblock {margin-left: 3.2em; font-size: smaller}
 div.smalllisp {margin-left: 3.2em}
-kbd {font-style:oblique}
+kbd {font-style: oblique}
 pre.display {font-family: inherit}
 pre.format {font-family: inherit}
 pre.menu-comment {font-family: serif}
@@ -50,10 +50,9 @@ pre.smalldisplay {font-family: inherit; font-size: smaller}
 pre.smallexample {font-size: smaller}
 pre.smallformat {font-family: inherit; font-size: smaller}
 pre.smalllisp {font-size: smaller}
-span.nocodebreak {white-space:nowrap}
-span.nolinebreak {white-space:nowrap}
-span.roman {font-family:serif; font-weight:normal}
-span.sansserif {font-family:sans-serif; font-weight:normal}
+span.nolinebreak {white-space: nowrap}
+span.roman {font-family: initial; font-weight: normal}
+span.sansserif {font-family: sans-serif; font-weight: normal}
 ul.no-bullet {list-style: none}
 -->
 </style>
@@ -61,7 +60,7 @@ ul.no-bullet {list-style: none}
 
 </head>
 
-<body lang="en" bgcolor="#FFFFFF" text="#000000" link="#0000FF" vlink="#800080" alink="#FF0000">
+<body lang="en">
 <h1 class="settitle" align="center">Installing GCC</h1>
 
 
@@ -117,7 +116,7 @@ that type mismatches occur, this could be the cause.
 </p>
 <p>The solution is not to use such a directory for building GCC.
 </p>
-<p>Similarly, when building from SVN or snapshots, or if you modify
+<p>Similarly, when building from the source repository or snapshots, or if you modify
 <samp>*.l</samp> files, you need the Flex lexical analyzer generator
 installed.  If you do not modify <samp>*.l</samp> files, releases contain
 the Flex-generated files and you do not need Flex installed to build
@@ -125,7 +124,7 @@ them.  There is still one Flex-based lexical analyzer (part of the
 build machinery, not of GCC itself) that is used even if you only
 build the C front end.
 </p>
-<p>When building from SVN or snapshots, or if you modify Texinfo
+<p>When building from the source repository or snapshots, or if you modify Texinfo
 documentation, you need version 4.7 or later of Texinfo installed if you
 want Info documentation to be regenerated.  Releases contain Info
 documentation pre-built for the unmodified documentation in the release.
@@ -251,6 +250,13 @@ the GCC middle end and back end are in <samp>libbackend.a</samp> this means
 that only the front end is actually LTO optimized.
 </p>
 </dd>
+<dt>&lsquo;<samp>bootstrap-lto-lean</samp>&rsquo;</dt>
+<dd><p>This option is similar to <code>bootstrap-lto</code>, but is intended for
+faster build by only using LTO in the final bootstrap stage.
+With &lsquo;<samp>make profiledbootstrap</samp>&rsquo; the LTO frontend
+is trained only on generator files.
+</p>
+</dd>
 <dt>&lsquo;<samp>bootstrap-debug</samp>&rsquo;</dt>
 <dd><p>Verifies that the compiler generates the same executable code, whether
 or not it is asked to emit debug information.  To this end, this
@@ -303,6 +309,14 @@ must be used along with <code>bootstrap-debug-lean</code> and
 <code>bootstrap-debug-lib</code>.
 </p>
 </dd>
+<dt>&lsquo;<samp>bootstrap-cet</samp>&rsquo;</dt>
+<dd><p>This option enables Intel CET for host tools during bootstrapping.
+&lsquo;<samp>BUILD_CONFIG=bootstrap-cet</samp>&rsquo; is equivalent to adding
+<samp>-fcf-protection</samp> to &lsquo;<samp>BOOT_CFLAGS</samp>&rsquo;.  This option
+assumes that the host supports Intel CET (e.g. GNU assembler version
+2.30 or later).
+</p>
+</dd>
 <dt>&lsquo;<samp>bootstrap-time</samp>&rsquo;</dt>
 <dd><p>Arranges for the run time of each program started by the GCC driver,
 built in any stage, to be logged to <samp>time.log</samp>, in the top level of
@@ -322,13 +336,6 @@ as parts of GCC can only be built with GCC.
 native compiler.  You can then use the native GCC compiler to build the
 cross compiler.  The installed native compiler needs to be GCC version
 2.95 or later.
-</p>
-<p>If the cross compiler is to be built with support for the Java
-programming language and the ability to compile .java source files is
-desired, the installed native compiler used to build the cross
-compiler needs to be the same GCC version as the cross compiler.  In
-addition the cross compiler needs to be configured with
-<samp>--with-ecj-jar=&hellip;</samp>.
 </p>
 <p>Assuming you have already installed a native copy of GCC and configured
 your cross compiler, issue the command <code>make</code>, which performs the
@@ -442,15 +449,28 @@ bootstrap the compiler with profile feedback, use <code>make profiledbootstrap</
 <p>When &lsquo;<samp>make profiledbootstrap</samp>&rsquo; is run, it will first build a <code>stage1</code>
 compiler.  This compiler is used to build a <code>stageprofile</code> compiler
 instrumented to collect execution counts of instruction and branch
-probabilities.  Then runtime libraries are compiled with profile collected.
-Finally a <code>stagefeedback</code> compiler is built using the information collected.
+probabilities.  Training run is done by building <code>stagetrain</code>
+compiler.  Finally a <code>stagefeedback</code> compiler is built
+using the information collected.
 </p>
 <p>Unlike standard bootstrap, several additional restrictions apply.  The
 compiler used to build <code>stage1</code> needs to support a 64-bit integral type.
 It is recommended to only use GCC for this.
 </p>
+<p>On Linux/x86_64 hosts with some restrictions (no virtualization) it is
+also possible to do autofdo build with &lsquo;<samp>make
+autoprofiledback</samp>&rsquo;. This uses Linux perf to sample branches in the
+binary and then rebuild it with feedback derived from the profile.
+Linux perf and the <code>autofdo</code> toolkit needs to be installed for
+this.
+</p>
+<p>Only the profile from the current build is used, so when an error
+occurs it is recommended to clean before restarting. Otherwise
+the code quality may be much worse.
+</p>
 <hr />
-<p><p><a href="./index.html">Return to the GCC Installation page</a>
+<p>
+<p><a href="./index.html">Return to the GCC Installation page</a>
 </p>
 
 

@@ -4,7 +4,32 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"runtime/internal/atomic"
+	"unsafe"
+)
+
+// For gccgo, use go:linkname to rename compiler-called functions to
+// themselves, so that the compiler will export them.
+//
+//go:linkname printbool runtime.printbool
+//go:linkname printfloat runtime.printfloat
+//go:linkname printint runtime.printint
+//go:linkname printhex runtime.printhex
+//go:linkname printuint runtime.printuint
+//go:linkname printcomplex runtime.printcomplex
+//go:linkname printstring runtime.printstring
+//go:linkname printpointer runtime.printpointer
+//go:linkname printiface runtime.printiface
+//go:linkname printeface runtime.printeface
+//go:linkname printslice runtime.printslice
+//go:linkname printnl runtime.printnl
+//go:linkname printsp runtime.printsp
+//go:linkname printlock runtime.printlock
+//go:linkname printunlock runtime.printunlock
+// Temporary for C code to call:
+//go:linkname gwrite runtime.gwrite
+//go:linkname printhex runtime.printhex
 
 // The compiler knows that a print of a value of this type
 // should use printhex instead of printuint (decimal).
@@ -19,11 +44,41 @@ func bytes(s string) (ret []byte) {
 	return
 }
 
+var (
+	// printBacklog is a circular buffer of messages written with the builtin
+	// print* functions, for use in postmortem analysis of core dumps.
+	printBacklog      [512]byte
+	printBacklogIndex int
+)
+
+// recordForPanic maintains a circular buffer of messages written by the
+// runtime leading up to a process crash, allowing the messages to be
+// extracted from a core dump.
+//
+// The text written during a process crash (following "panic" or "fatal
+// error") is not saved, since the goroutine stacks will generally be readable
+// from the runtime datastructures in the core file.
+func recordForPanic(b []byte) {
+	printlock()
+
+	if atomic.Load(&panicking) == 0 {
+		// Not actively crashing: maintain circular buffer of print output.
+		for i := 0; i < len(b); {
+			n := copy(printBacklog[printBacklogIndex:], b[i:])
+			i += n
+			printBacklogIndex += n
+			printBacklogIndex %= len(printBacklog)
+		}
+	}
+
+	printunlock()
+}
+
 var debuglock mutex
 
 // The compiler emits calls to printlock and printunlock around
 // the multiple calls that implement a single Go print or println
-// statement. Some of the print helpers (printsp, for example)
+// statement. Some of the print helpers (printslice, for example)
 // call print recursively. There is also the problem of a crash
 // happening during the print routines and needing to acquire
 // the print lock to print information about the crash.
@@ -53,8 +108,14 @@ func gwrite(b []byte) {
 	if len(b) == 0 {
 		return
 	}
+	recordForPanic(b)
 	gp := getg()
-	if gp == nil || gp.writebuf == nil {
+	// Don't use the writebuf if gp.m is dying. We want anything
+	// written through gwrite to appear in the terminal rather
+	// than be written to in some buffer, if we're in a panicking state.
+	// Note that we can't just clear writebuf in the gp.m.dying case
+	// because a panic isn't allowed to have any write barriers.
+	if gp == nil || gp.writebuf == nil || gp.m.dying > 0 {
 		writeErr(b)
 		return
 	}
@@ -64,31 +125,31 @@ func gwrite(b []byte) {
 }
 
 func printsp() {
-	print(" ")
+	printstring(" ")
 }
 
 func printnl() {
-	print("\n")
+	printstring("\n")
 }
 
 func printbool(v bool) {
 	if v {
-		print("true")
+		printstring("true")
 	} else {
-		print("false")
+		printstring("false")
 	}
 }
 
 func printfloat(v float64) {
 	switch {
 	case v != v:
-		print("NaN")
+		printstring("NaN")
 		return
 	case v+v == v && v > 0:
-		print("+Inf")
+		printstring("+Inf")
 		return
 	case v+v == v && v < 0:
-		print("-Inf")
+		printstring("-Inf")
 		return
 	}
 
@@ -170,7 +231,7 @@ func printuint(v uint64) {
 
 func printint(v int64) {
 	if v < 0 {
-		print("-")
+		printstring("-")
 		v = -v
 	}
 	printuint(uint64(v))
@@ -199,17 +260,13 @@ func printpointer(p unsafe.Pointer) {
 }
 
 func printstring(s string) {
-	if uintptr(len(s)) > maxstring {
-		gwrite(bytes("[string too long]"))
-		return
-	}
 	gwrite(bytes(s))
 }
 
 func printslice(s []byte) {
 	sp := (*slice)(unsafe.Pointer(&s))
 	print("[", len(s), "/", cap(s), "]")
-	printpointer(unsafe.Pointer(sp.array))
+	printpointer(sp.array)
 }
 
 func printeface(e eface) {

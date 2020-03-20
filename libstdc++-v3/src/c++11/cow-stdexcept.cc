@@ -1,6 +1,6 @@
 // Methods for Exception Support for -*- C++ -*-
 
-// Copyright (C) 2014-2016 Free Software Foundation, Inc.
+// Copyright (C) 2014-2019 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -53,20 +53,53 @@ namespace std _GLIBCXX_VISIBILITY(default)
 {
 _GLIBCXX_BEGIN_NAMESPACE_VERSION
 
-  // Copy constructors and assignment operators defined using COW std::string
+  // Copy/move constructors and assignment operators defined using COW string.
+  // These operations are noexcept even though copying a COW string is not,
+  // but we know that the string member in an exception has not been "leaked"
+  // so copying is a simple reference count increment.
+  // For the fully dynamic string moves are not noexcept (due to needing to
+  // allocate an empty string) so we just define the moves as copies here.
 
   logic_error::logic_error(const logic_error& e) noexcept
-  : _M_msg(e._M_msg) { }
+  : exception(e), _M_msg(e._M_msg) { }
 
   logic_error& logic_error::operator=(const logic_error& e) noexcept
   { _M_msg = e._M_msg; return *this; }
 
+#if _GLIBCXX_FULLY_DYNAMIC_STRING == 0
+  logic_error::logic_error(logic_error&& e) noexcept = default;
+
+  logic_error&
+  logic_error::operator=(logic_error&& e) noexcept = default;
+#else
+  logic_error::logic_error(logic_error&& e) noexcept
+  : exception(e), _M_msg(e._M_msg) { }
+
+  logic_error&
+  logic_error::operator=(logic_error&& e) noexcept
+  { _M_msg = e._M_msg; return *this; }
+#endif
+
   runtime_error::runtime_error(const runtime_error& e) noexcept
-  : _M_msg(e._M_msg) { }
+  : exception(e), _M_msg(e._M_msg) { }
 
   runtime_error&
   runtime_error::operator=(const runtime_error& e) noexcept
   { _M_msg = e._M_msg; return *this; }
+
+#if _GLIBCXX_FULLY_DYNAMIC_STRING == 0
+  runtime_error::runtime_error(runtime_error&& e) noexcept = default;
+
+  runtime_error&
+  runtime_error::operator=(runtime_error&& e) noexcept = default;
+#else
+  runtime_error::runtime_error(runtime_error&& e) noexcept
+  : exception(e), _M_msg(e._M_msg) { }
+
+  runtime_error&
+  runtime_error::operator=(runtime_error&& e) noexcept
+  { _M_msg = e._M_msg; return *this; }
+#endif
 
   // New C++11 constructors:
 
@@ -185,6 +218,7 @@ _GLIBCXX_END_NAMESPACE_VERSION
 // declared transaction-safe, so we just don't provide transactional clones
 // in this case.
 #if _GLIBCXX_USE_WEAK_REF
+#ifdef _GLIBCXX_USE_C99_STDINT_TR1
 
 extern "C" {
 
@@ -207,6 +241,8 @@ extern "C" {
 extern void* _ZGTtnaX (size_t sz) __attribute__((weak));
 extern void _ZGTtdlPv (void* ptr) __attribute__((weak));
 extern uint8_t _ITM_RU1(const uint8_t *p)
+  ITM_REGPARM __attribute__((weak));
+extern uint16_t _ITM_RU2(const uint16_t *p)
   ITM_REGPARM __attribute__((weak));
 extern uint32_t _ITM_RU4(const uint32_t *p)
   ITM_REGPARM __attribute__((weak));
@@ -272,12 +308,15 @@ _txnal_cow_string_C1_for_exceptions(void* that, const char* s,
 static void* txnal_read_ptr(void* const * ptr)
 {
   static_assert(sizeof(uint64_t) == sizeof(void*)
-		|| sizeof(uint32_t) == sizeof(void*),
-		"Pointers must be 32 bits or 64 bits wide");
+		|| sizeof(uint32_t) == sizeof(void*)
+		|| sizeof(uint16_t) == sizeof(void*),
+		"Pointers must be 16 bits, 32 bits or 64 bits wide");
 #if __UINTPTR_MAX__ == __UINT64_MAX__
   return (void*)_ITM_RU8((const uint64_t*)ptr);
-#else
+#elif __UINTPTR_MAX__ == __UINT32_MAX__
   return (void*)_ITM_RU4((const uint32_t*)ptr);
+#else
+  return (void*)_ITM_RU2((const uint16_t*)ptr);
 #endif
 }
 
@@ -292,6 +331,7 @@ _txnal_cow_string_c_str(const void* that)
   return (const char*) txnal_read_ptr((void**)&bs->_M_dataplus._M_p);
 }
 
+#if _GLIBCXX_USE_DUAL_ABI
 const char*
 _txnal_sso_string_c_str(const void* that)
 {
@@ -299,6 +339,7 @@ _txnal_sso_string_c_str(const void* that)
       (void* const*)const_cast<char* const*>(
 	  &((const std::__sso_string*) that)->_M_s._M_p));
 }
+#endif
 
 void
 _txnal_cow_string_D1_commit(void* data)
@@ -344,9 +385,24 @@ _txnal_runtime_error_get_msg(void* e)
 // result in undefined behavior, which is in this case not initializing this
 // string.
 #if _GLIBCXX_USE_DUAL_ABI
-#define CTORDTORSTRINGCSTR(s) _txnal_sso_string_c_str((s))
+#define CTORS_FROM_SSOSTRING(NAME, CLASS, BASE)			\
+void									\
+_ZGTtNSt##NAME##C1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE( \
+    CLASS* that, const std::__sso_string& s)				\
+{									\
+  CLASS e("");								\
+  _ITM_memcpyRnWt(that, &e, sizeof(CLASS));				\
+  /* Get the C string from the SSO string.  */				\
+  _txnal_cow_string_C1_for_exceptions(_txnal_##BASE##_get_msg(that),	\
+				      _txnal_sso_string_c_str(&s), that); \
+}									\
+void									\
+_ZGTtNSt##NAME##C2ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE( \
+    CLASS*, const std::__sso_string&) __attribute__((alias		\
+("_ZGTtNSt" #NAME							\
+  "C1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")));
 #else
-#define CTORDTORSTRINGCSTR(s) ""
+#define CTORS_FROM_SSOSTRING(NAME, CLASS, BASE)
 #endif
 
 // This macro defines transaction constructors and destructors for a specific
@@ -373,21 +429,7 @@ _ZGTtNSt##NAME##C1EPKc (CLASS* that, const char* s)			\
 void									\
 _ZGTtNSt##NAME##C2EPKc (CLASS*, const char*)				\
   __attribute__((alias ("_ZGTtNSt" #NAME "C1EPKc")));			\
-void									\
-_ZGTtNSt##NAME##C1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE( \
-    CLASS* that, const std::__sso_string& s)				\
-{									\
-  CLASS e("");								\
-  _ITM_memcpyRnWt(that, &e, sizeof(CLASS));				\
-  /* Get the C string from the SSO string.  */				\
-  _txnal_cow_string_C1_for_exceptions(_txnal_##BASE##_get_msg(that),	\
-				      CTORDTORSTRINGCSTR(&s), that);	\
-}									\
-void									\
-_ZGTtNSt##NAME##C2ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE( \
-    CLASS*, const std::__sso_string&) __attribute__((alias		\
-("_ZGTtNSt" #NAME							\
-  "C1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")));	\
+CTORS_FROM_SSOSTRING(NAME, CLASS, BASE)					\
 void									\
 _ZGTtNSt##NAME##D1Ev(CLASS* that)					\
 { _txnal_cow_string_D1(_txnal_##BASE##_get_msg(that)); }		\
@@ -435,4 +477,5 @@ CTORDTOR(15underflow_error, std::underflow_error, runtime_error)
 
 }
 
+#endif  // _GLIBCXX_USE_C99_STDINT_TR1
 #endif  // _GLIBCXX_USE_WEAK_REF

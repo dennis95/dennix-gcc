@@ -1,5 +1,5 @@
 /* RTL-level loop invariant motion.
-   Copyright (C) 2004-2016 Free Software Foundation, Inc.
+   Copyright (C) 2004-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -43,6 +43,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree.h"
 #include "cfghooks.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "insn-config.h"
 #include "regs.h"
@@ -107,13 +108,13 @@ struct invariant
   /* The number of invariants which eqto this.  */
   unsigned eqno;
 
-  /* If we moved the invariant out of the loop, the register that contains its
-     value.  */
-  rtx reg;
-
   /* If we moved the invariant out of the loop, the original regno
      that contained its value.  */
   int orig_regno;
+
+  /* If we moved the invariant out of the loop, the register that contains its
+     value.  */
+  rtx reg;
 
   /* The definition of the invariant.  */
   struct def *def;
@@ -133,12 +134,12 @@ struct invariant
   /* Cost of the invariant.  */
   unsigned cost;
 
-  /* The invariants it depends on.  */
-  bitmap depends_on;
-
   /* Used for detecting already visited invariants during determining
      costs of movements.  */
   unsigned stamp;
+
+  /* The invariants it depends on.  */
+  bitmap depends_on;
 };
 
 /* Currently processed loop.  */
@@ -334,6 +335,8 @@ hash_invariant_expr_1 (rtx_insn *insn, rtx x)
 	}
       else if (fmt[i] == 'i' || fmt[i] == 'n')
 	val ^= XINT (x, i);
+      else if (fmt[i] == 'p')
+	val ^= constant_lower_bound (SUBREG_BYTE (x));
     }
 
   return val;
@@ -417,6 +420,11 @@ invariant_expr_equal_p (rtx_insn *insn1, rtx e1, rtx_insn *insn2, rtx e2)
       else if (fmt[i] == 'i' || fmt[i] == 'n')
 	{
 	  if (XINT (e1, i) != XINT (e2, i))
+	    return false;
+	}
+      else if (fmt[i] == 'p')
+	{
+	  if (maybe_ne (SUBREG_BYTE (e1), SUBREG_BYTE (e2)))
 	    return false;
 	}
       /* Unhandled type of subexpression, we fail conservatively.  */
@@ -597,13 +605,17 @@ find_exits (struct loop *loop, basic_block *body,
 
 	  FOR_EACH_EDGE (e, ei, body[i]->succs)
 	    {
-	      if (flow_bb_inside_loop_p (loop, e->dest))
-		continue;
-
-	      bitmap_set_bit (may_exit, i);
-	      bitmap_set_bit (has_exit, i);
-	      outermost_exit = find_common_loop (outermost_exit,
-						 e->dest->loop_father);
+	      if (! flow_bb_inside_loop_p (loop, e->dest))
+		{
+		  bitmap_set_bit (may_exit, i);
+		  bitmap_set_bit (has_exit, i);
+		  outermost_exit = find_common_loop (outermost_exit,
+						     e->dest->loop_father);
+		}
+	      /* If we enter a subloop that might never terminate treat
+	         it like a possible exit.  */
+	      if (flow_loop_nested_p (loop, e->dest->loop_father))
+		bitmap_set_bit (may_exit, i);
 	    }
 	  continue;
 	}
@@ -648,6 +660,9 @@ may_assign_reg_p (rtx x)
   return (GET_MODE (x) != VOIDmode
 	  && GET_MODE (x) != BLKmode
 	  && can_copy_p (GET_MODE (x))
+	  /* Do not mess with the frame pointer adjustments that can
+	     be generated e.g. by expand_builtin_setjmp_receiver.  */
+	  && x != frame_pointer_rtx
 	  && (!REG_P (x)
 	      || !HARD_REGISTER_P (x)
 	      || REGNO_REG_CLASS (REGNO (x)) != NO_REGS));
@@ -666,11 +681,7 @@ find_defs (struct loop *loop)
 	       loop->num);
     }
 
-  df_remove_problem (df_chain);
-  df_process_deferred_rescans ();
   df_chain_add_problem (DF_UD_CHAIN);
-  df_live_add_problem ();
-  df_live_set_all_dirty ();
   df_set_flags (DF_RD_PRUNE_DEAD_DEFS);
   df_analyze_loop (loop);
   check_invariant_table_size ();
@@ -769,16 +780,16 @@ canonicalize_address_mult (rtx x)
   FOR_EACH_SUBRTX_VAR (iter, array, x, NONCONST)
     {
       rtx sub = *iter;
-
-      if (GET_CODE (sub) == ASHIFT
+      scalar_int_mode sub_mode;
+      if (is_a <scalar_int_mode> (GET_MODE (sub), &sub_mode)
+	  && GET_CODE (sub) == ASHIFT
 	  && CONST_INT_P (XEXP (sub, 1))
-	  && INTVAL (XEXP (sub, 1)) < GET_MODE_BITSIZE (GET_MODE (sub))
+	  && INTVAL (XEXP (sub, 1)) < GET_MODE_BITSIZE (sub_mode)
 	  && INTVAL (XEXP (sub, 1)) >= 0)
 	{
 	  HOST_WIDE_INT shift = INTVAL (XEXP (sub, 1));
 	  PUT_CODE (sub, MULT);
-	  XEXP (sub, 1) = gen_int_mode ((HOST_WIDE_INT) 1 << shift,
-					GET_MODE (sub));
+	  XEXP (sub, 1) = gen_int_mode (HOST_WIDE_INT_1 << shift, sub_mode);
 	  iter.skip_subrtxes ();
 	}
     }
@@ -1038,7 +1049,7 @@ check_dependencies (rtx_insn *insn, bitmap depends_on)
   return true;
 }
 
-/* Pre-check candidate DEST to skip the one which can not make a valid insn
+/* Pre-check candidate DEST to skip the one which cannot make a valid insn
    during move_invariant_reg.  SIMPLE is to skip HARD_REGISTER.  */
 static bool
 pre_check_invariant_p (bool simple, rtx dest)
@@ -1214,10 +1225,10 @@ find_invariants_body (struct loop *loop, basic_block *body,
 static void
 find_invariants (struct loop *loop)
 {
-  bitmap may_exit = BITMAP_ALLOC (NULL);
-  bitmap always_reached = BITMAP_ALLOC (NULL);
-  bitmap has_exit = BITMAP_ALLOC (NULL);
-  bitmap always_executed = BITMAP_ALLOC (NULL);
+  auto_bitmap may_exit;
+  auto_bitmap always_reached;
+  auto_bitmap has_exit;
+  auto_bitmap always_executed;
   basic_block *body = get_loop_body_in_dom_order (loop);
 
   find_exits (loop, body, may_exit, has_exit);
@@ -1228,10 +1239,6 @@ find_invariants (struct loop *loop)
   find_invariants_body (loop, body, always_reached, always_executed);
   merge_identical_invariants ();
 
-  BITMAP_FREE (always_reached);
-  BITMAP_FREE (always_executed);
-  BITMAP_FREE (may_exit);
-  BITMAP_FREE (has_exit);
   free (body);
 }
 
@@ -1354,7 +1361,7 @@ get_inv_cost (struct invariant *inv, int *comp_cost, unsigned *regs_needed,
        This usually has the effect that FP constant loads from the constant
        pool are not moved out of the loop.
 
-       Note that this also means that dependent invariants can not be moved.
+       Note that this also means that dependent invariants cannot be moved.
        However, the primary purpose of this pass is to move loop invariant
        address arithmetic out of loops, and address arithmetic that depends
        on floating point constants is unlikely to ever occur.  */
@@ -1880,6 +1887,10 @@ move_invariants (struct loop *loop)
 				 GENERAL_REGS, NO_REGS, GENERAL_REGS);
 	  }
     }
+  /* Remove the DF_UD_CHAIN problem added in find_defs before rescanning,
+     to save a bit of compile time.  */
+  df_remove_problem (df_chain);
+  df_process_deferred_rescans ();
 }
 
 /* Initializes invariant motion data.  */
@@ -2190,7 +2201,7 @@ calculate_loop_reg_pressure (void)
 	    }
 	}
     }
-  bitmap_clear (&curr_regs_live);
+  bitmap_release (&curr_regs_live);
   if (flag_ira_region == IRA_REGION_MIXED
       || flag_ira_region == IRA_REGION_ALL)
     FOR_EACH_LOOP (loop, 0)
@@ -2243,6 +2254,14 @@ move_loop_invariants (void)
 {
   struct loop *loop;
 
+  if (optimize == 1)
+    df_live_add_problem ();
+  /* ??? This is a hack.  We should only need to call df_live_set_all_dirty
+     for optimize == 1, but can_move_invariant_reg relies on DF_INSN_LUID
+     being up-to-date.  That isn't always true (even after df_analyze)
+     because df_process_deferred_rescans doesn't necessarily cause
+     blocks to be rescanned.  */
+  df_live_set_all_dirty ();
   if (flag_ira_loop_pressure)
     {
       df_analyze ();
@@ -2274,6 +2293,9 @@ move_loop_invariants (void)
   free (invariant_table);
   invariant_table = NULL;
   invariant_table_size = 0;
+
+  if (optimize == 1)
+    df_remove_problem (df_live);
 
   checking_verify_flow_info ();
 }

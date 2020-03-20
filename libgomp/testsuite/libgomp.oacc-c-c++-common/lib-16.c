@@ -1,6 +1,5 @@
-/* { dg-do run } */
+/* Test if acc_copyin has present_or_ and reference counting behavior.  */
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <openacc.h>
 
@@ -19,15 +18,21 @@ main (int argc, char **argv)
     }
 
   (void) acc_copyin (h, N);
-
-  fprintf (stderr, "CheCKpOInT\n");
   (void) acc_copyin (h, N);
+
+  acc_copyout (h, N);
+
+  if (!acc_is_present (h, N))
+    abort ();
+
+  acc_copyout (h, N);
+
+#if !ACC_MEM_SHARED
+  if (acc_is_present (h, N))
+    abort ();
+#endif
 
   free (h);
 
   return 0;
 }
-
-/* { dg-output "CheCKpOInT(\n|\r\n|\r).*" } */
-/* { dg-output "\\\[\[0-9a-fA-FxX\]+,\\\+256\\\] already mapped to \\\[\[0-9a-fA-FxX\]+,\\\+256\\\]" } */
-/* { dg-shouldfail "" } */

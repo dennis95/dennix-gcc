@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -13,6 +13,8 @@ func init() {
 	register("Crash", Crash)
 }
 
+var NilPointer *string
+
 func test(name string) {
 	defer func() {
 		if x := recover(); x != nil {
@@ -21,8 +23,7 @@ func test(name string) {
 		fmt.Printf(" done\n")
 	}()
 	fmt.Printf("%s:", name)
-	var s *string
-	_ = *s
+	*NilPointer = name
 	fmt.Print("SHOULD NOT BE HERE")
 }
 

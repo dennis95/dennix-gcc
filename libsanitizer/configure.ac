@@ -1,7 +1,6 @@
 #                                               -*- Autoconf -*-
 # Process this file with autoconf to produce a configure script.
 
-AC_PREREQ([2.64])
 AC_INIT(package-unused, version-unused, libsanitizer)
 AC_CONFIG_SRCDIR([include/sanitizer/common_interface_defs.h])
 
@@ -93,7 +92,7 @@ AM_CONDITIONAL(TSAN_SUPPORTED, [test "x$TSAN_SUPPORTED" = "xyes"])
 AM_CONDITIONAL(LSAN_SUPPORTED, [test "x$LSAN_SUPPORTED" = "xyes"])
 
 # Check for functions needed.
-AC_CHECK_FUNCS(clock_getres clock_gettime clock_settime)
+AC_CHECK_FUNCS(clock_getres clock_gettime clock_settime lstat readlink)
 
 # Common libraries that we need to link against for all sanitizer libs.
 link_sanitizer_common='-lpthread -lm'
@@ -253,12 +252,12 @@ if test "$have_mmap" = "no"; then
   ALLOC_FILE=alloc.lo
 else
   VIEW_FILE=mmapio.lo
-  AC_PREPROC_IFELSE([
+  AC_PREPROC_IFELSE([AC_LANG_SOURCE([
 #include <sys/mman.h>
 #if !defined(MAP_ANONYMOUS) && !defined(MAP_ANON)
   #error no MAP_ANONYMOUS
 #endif
-], [ALLOC_FILE=mmap.lo], [ALLOC_FILE=alloc.lo])
+])], [ALLOC_FILE=mmap.lo], [ALLOC_FILE=alloc.lo])
 fi
 AC_SUBST(VIEW_FILE)
 AC_SUBST(ALLOC_FILE)
@@ -339,30 +338,6 @@ fi
 
 AC_SUBST([RPC_DEFS], [$rpc_defs])
 
-dnl If this file is processed by autoconf-2.67 or later then the CPPFLAGS
-dnl "-o conftest.iii" can disappear, conftest.iii be replaced with
-dnl conftest.i in the sed command line, and the rm deleted.
-dnl Not all cpp's accept -o, and gcc -E does not accept a second file
-dnl argument as the output file.
-AC_CACHE_CHECK([obstack params],
-[libsanitizer_cv_sys_obstack],
-[save_cppflags=$CPPFLAGS
-CPPFLAGS="-I${srcdir}/../include -o conftest.iii $CPPFLAGS"
-AC_PREPROC_IFELSE([AC_LANG_SOURCE([
-#include "obstack.h"
-#ifdef _OBSTACK_SIZE_T
-_OBSTACK_SIZE_T
-#else
-int
-#endif
-])],
-[libsanitizer_cv_sys_obstack=`sed -e '/^#/d;/^[	 ]*$/d' conftest.iii | sed -e '$!d;s/size_t/SIZE_T/'`],
-[libsanitizer_cv_sys_obstack=int])
-CPPFLAGS=$save_cppflags
-rm -f conftest.iii
-])
-AC_SUBST([OBSTACK_DEFS], [-D_OBSTACK_SIZE_T=\"$libsanitizer_cv_sys_obstack\"])
-
 AM_CONDITIONAL(LIBBACKTRACE_SUPPORTED,
 	       [test "x${BACKTRACE_SUPPORTED}x${BACKTRACE_USES_MALLOC}" = "x1x0"])
 
@@ -399,5 +374,18 @@ _EOF
 fi
 
 AC_SUBST([TSAN_TARGET_DEPENDENT_OBJECTS])
+AC_SUBST([SANITIZER_COMMON_TARGET_DEPENDENT_OBJECTS])
+
+# Determine what GCC version number to use in filesystem paths.
+GCC_BASE_VER
+
+# Add CET specific flags if Intel CET is enabled.
+GCC_CET_FLAGS(CET_FLAGS)
+EXTRA_CFLAGS="$EXTRA_CFLAGS $CET_FLAGS"
+EXTRA_CXXFLAGS="$EXTRA_CXXFLAGS $CET_FLAGS"
+EXTRA_ASFLAGS=$CET_FLAGS
+AC_SUBST(EXTRA_ASFLAGS)
+AC_SUBST(EXTRA_CFLAGS)
+AC_SUBST(EXTRA_CXXFLAGS)
 
 AC_OUTPUT

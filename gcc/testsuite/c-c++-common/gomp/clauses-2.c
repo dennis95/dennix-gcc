@@ -1,3 +1,4 @@
+/* { dg-skip-if "PR 68733" { hppa*-*-hpux* && { ! lp64 } } } */
 struct S { int r; int *s; int t[10]; };
 void bar (int *);
 
@@ -49,5 +50,5 @@ foo (int *p, int q, struct S t, int i, int j, int k, int l)
   #pragma omp target map (t.r) map (t) map (t.s[0]) firstprivate (t) /* { dg-error "appears both in data and map clauses" } */
     bar (t.s);
   #pragma omp target map (t) map (t.r) firstprivate (t) map (t.s[0]) /* { dg-error "appears both in data and map clauses" } */
-    bar (t.s); /* { dg-error "appears more than once in map clauses" "" { target *-*-* } 51 } */
+    bar (t.s); /* { dg-error "appears more than once in map clauses" "" { target *-*-* } .-1 } */
 }

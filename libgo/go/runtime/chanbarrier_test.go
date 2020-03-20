@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -57,7 +57,7 @@ func testChanSendBarrier(useSelect bool) {
 	var globalMu sync.Mutex
 	outer := 100
 	inner := 100000
-	if testing.Short() {
+	if testing.Short() || runtime.GOARCH == "wasm" {
 		outer = 10
 		inner = 1000
 	}

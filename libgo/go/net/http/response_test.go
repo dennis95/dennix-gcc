@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -10,6 +10,7 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"fmt"
+	"go/ast"
 	"io"
 	"io/ioutil"
 	"net/http/internal"
@@ -156,6 +157,34 @@ var respTests = []respTest{
 		"Body here\ncontinued",
 	},
 
+	// Trailer header but no TransferEncoding
+	{
+		"HTTP/1.0 200 OK\r\n" +
+			"Trailer: Content-MD5, Content-Sources\r\n" +
+			"Content-Length: 10\r\n" +
+			"Connection: close\r\n" +
+			"\r\n" +
+			"Body here\n",
+
+		Response{
+			Status:     "200 OK",
+			StatusCode: 200,
+			Proto:      "HTTP/1.0",
+			ProtoMajor: 1,
+			ProtoMinor: 0,
+			Request:    dummyReq("GET"),
+			Header: Header{
+				"Connection":     {"close"},
+				"Content-Length": {"10"},
+				"Trailer":        []string{"Content-MD5, Content-Sources"},
+			},
+			Close:         true,
+			ContentLength: 10,
+		},
+
+		"Body here\n",
+	},
+
 	// Chunked response with Content-Length.
 	{
 		"HTTP/1.1 200 OK\r\n" +
@@ -294,7 +323,7 @@ var respTests = []respTest{
 	},
 
 	// Status line without a Reason-Phrase, but trailing space.
-	// (permitted by RFC 2616)
+	// (permitted by RFC 7230, section 3.1.2)
 	{
 		"HTTP/1.0 303 \r\n\r\n",
 		Response{
@@ -313,11 +342,11 @@ var respTests = []respTest{
 	},
 
 	// Status line without a Reason-Phrase, and no trailing space.
-	// (not permitted by RFC 2616, but we'll accept it anyway)
+	// (not permitted by RFC 7230, but we'll accept it anyway)
 	{
 		"HTTP/1.0 303\r\n\r\n",
 		Response{
-			Status:        "303 ",
+			Status:        "303",
 			StatusCode:    303,
 			Proto:         "HTTP/1.0",
 			ProtoMajor:    1,
@@ -505,6 +534,55 @@ some body`,
 
 		"Body here\n",
 	},
+
+	{
+		"HTTP/1.1 200 OK\r\n" +
+			"Content-Encoding: gzip\r\n" +
+			"Content-Length: 23\r\n" +
+			"Connection: keep-alive\r\n" +
+			"Keep-Alive: timeout=7200\r\n\r\n" +
+			"\x1f\x8b\b\x00\x00\x00\x00\x00\x00\x00s\xf3\xf7\a\x00\xab'\xd4\x1a\x03\x00\x00\x00",
+		Response{
+			Status:     "200 OK",
+			StatusCode: 200,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Request:    dummyReq("GET"),
+			Header: Header{
+				"Content-Length":   {"23"},
+				"Content-Encoding": {"gzip"},
+				"Connection":       {"keep-alive"},
+				"Keep-Alive":       {"timeout=7200"},
+			},
+			Close:         false,
+			ContentLength: 23,
+		},
+		"\x1f\x8b\b\x00\x00\x00\x00\x00\x00\x00s\xf3\xf7\a\x00\xab'\xd4\x1a\x03\x00\x00\x00",
+	},
+
+	// Issue 19989: two spaces between HTTP version and status.
+	{
+		"HTTP/1.0  401 Unauthorized\r\n" +
+			"Content-type: text/html\r\n" +
+			"WWW-Authenticate: Basic realm=\"\"\r\n\r\n" +
+			"Your Authentication failed.\r\n",
+		Response{
+			Status:     "401 Unauthorized",
+			StatusCode: 401,
+			Proto:      "HTTP/1.0",
+			ProtoMajor: 1,
+			ProtoMinor: 0,
+			Request:    dummyReq("GET"),
+			Header: Header{
+				"Content-Type":     {"text/html"},
+				"Www-Authenticate": {`Basic realm=""`},
+			},
+			Close:         true,
+			ContentLength: -1,
+		},
+		"Your Authentication failed.\r\n",
+	},
 }
 
 // tests successful calls to ReadResponse, and inspects the returned Response.
@@ -562,6 +640,7 @@ var readResponseCloseInMiddleTests = []struct {
 // reading only part of its contents advances the read to the end of
 // the request, right up until the next request.
 func TestReadResponseCloseInMiddle(t *testing.T) {
+	t.Parallel()
 	for _, test := range readResponseCloseInMiddleTests {
 		fatalf := func(format string, args ...interface{}) {
 			args = append([]interface{}{test.chunked, test.compressed}, args...)
@@ -656,10 +735,14 @@ func diff(t *testing.T, prefix string, have, want interface{}) {
 		t.Errorf("%s: type mismatch %v want %v", prefix, hv.Type(), wv.Type())
 	}
 	for i := 0; i < hv.NumField(); i++ {
+		name := hv.Type().Field(i).Name
+		if !ast.IsExported(name) {
+			continue
+		}
 		hf := hv.Field(i).Interface()
 		wf := wv.Field(i).Interface()
 		if !reflect.DeepEqual(hf, wf) {
-			t.Errorf("%s: %s = %v want %v", prefix, hv.Type().Field(i).Name, hf, wf)
+			t.Errorf("%s: %s = %v want %v", prefix, name, hf, wf)
 		}
 	}
 }
@@ -786,6 +869,16 @@ func TestReadResponseErrors(t *testing.T) {
 		}
 	}
 
+	contentLength := func(status, body string, wantErr interface{}) testCase {
+		return testCase{
+			name:    fmt.Sprintf("status %q %q", status, body),
+			in:      fmt.Sprintf("HTTP/1.1 %s\r\n%s", status, body),
+			wantErr: wantErr,
+		}
+	}
+
+	errMultiCL := "message cannot contain multiple Content-Length headers"
+
 	tests := []testCase{
 		{"", "", io.ErrUnexpectedEOF},
 		{"", "HTTP/1.1 301 Moved Permanently\r\nFoo: bar", io.ErrUnexpectedEOF},
@@ -815,7 +908,25 @@ func TestReadResponseErrors(t *testing.T) {
 		version("HTTP/A.B", true),
 		version("HTTP/1", true),
 		version("http/1.1", true),
+
+		contentLength("200 OK", "Content-Length: 10\r\nContent-Length: 7\r\n\r\nGopher hey\r\n", errMultiCL),
+		contentLength("200 OK", "Content-Length: 7\r\nContent-Length: 7\r\n\r\nGophers\r\n", nil),
+		contentLength("201 OK", "Content-Length: 0\r\nContent-Length: 7\r\n\r\nGophers\r\n", errMultiCL),
+		contentLength("300 OK", "Content-Length: 0\r\nContent-Length: 0 \r\n\r\nGophers\r\n", nil),
+		contentLength("200 OK", "Content-Length:\r\nContent-Length:\r\n\r\nGophers\r\n", nil),
+		contentLength("206 OK", "Content-Length:\r\nContent-Length: 0 \r\nConnection: close\r\n\r\nGophers\r\n", errMultiCL),
+
+		// multiple content-length headers for 204 and 304 should still be checked
+		contentLength("204 OK", "Content-Length: 7\r\nContent-Length: 8\r\n\r\n", errMultiCL),
+		contentLength("204 OK", "Content-Length: 3\r\nContent-Length: 3\r\n\r\n", nil),
+		contentLength("304 OK", "Content-Length: 880\r\nContent-Length: 1\r\n\r\n", errMultiCL),
+		contentLength("304 OK", "Content-Length: 961\r\nContent-Length: 961\r\n\r\n", nil),
+
+		// golang.org/issue/22464
+		{"leading space in header", "HTTP/1.1 200 OK\r\n Content-type: text/html\r\nFoo: bar\r\n\r\n", "malformed MIME"},
+		{"leading tab in header", "HTTP/1.1 200 OK\r\n\tContent-type: text/html\r\nFoo: bar\r\n\r\n", "malformed MIME"},
 	}
+
 	for i, tt := range tests {
 		br := bufio.NewReader(strings.NewReader(tt.in))
 		_, rerr := ReadResponse(br, nil)
@@ -866,5 +977,31 @@ func TestNeedsSniff(t *testing.T) {
 	r.handlerHeader = Header{"Content-Type": nil}
 	if got, want := r.needsSniff(), false; got != want {
 		t.Errorf("needsSniff empty Content-Type = %t; want %t", got, want)
+	}
+}
+
+// A response should only write out single Connection: close header. Tests #19499.
+func TestResponseWritesOnlySingleConnectionClose(t *testing.T) {
+	const connectionCloseHeader = "Connection: close"
+
+	res, err := ReadResponse(bufio.NewReader(strings.NewReader("HTTP/1.0 200 OK\r\n\r\nAAAA")), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse failed %v", err)
+	}
+
+	var buf1 bytes.Buffer
+	if err = res.Write(&buf1); err != nil {
+		t.Fatalf("Write failed %v", err)
+	}
+	if res, err = ReadResponse(bufio.NewReader(&buf1), nil); err != nil {
+		t.Fatalf("ReadResponse failed %v", err)
+	}
+
+	var buf2 bytes.Buffer
+	if err = res.Write(&buf2); err != nil {
+		t.Fatalf("Write failed %v", err)
+	}
+	if count := strings.Count(buf2.String(), connectionCloseHeader); count != 1 {
+		t.Errorf("Found %d %q header", count, connectionCloseHeader)
 	}
 }

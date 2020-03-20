@@ -1,4 +1,4 @@
-// Copyright 2014 The Go Authors.  All rights reserved.
+// Copyright 2014 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -26,9 +26,6 @@ const (
 // GetRandom calls the Linux getrandom system call.
 // See https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=c6e9d6f38894798696f23c8084ca7edbf16ee895
 func GetRandom(p []byte, flags GetRandomFlag) (n int, err error) {
-	if randomTrap == 0 {
-		return 0, syscall.ENOSYS
-	}
 	if len(p) == 0 {
 		return 0, nil
 	}

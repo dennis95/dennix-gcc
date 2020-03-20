@@ -1,5 +1,5 @@
 /* Perform branch target register load optimizations.
-   Copyright (C) 2001-2016 Free Software Foundation, Inc.
+   Copyright (C) 2001-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -27,6 +27,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "df.h"
 #include "insn-config.h"
 #include "regs.h"
+#include "memmodel.h"
 #include "emit-rtl.h"
 #include "recog.h"
 #include "diagnostic-core.h"
@@ -184,7 +185,7 @@ static int first_btr, last_btr;
 static int
 basic_block_freq (const_basic_block bb)
 {
-  return bb->frequency;
+  return bb->count.to_frequency (cfun);
 }
 
 /* If the rtx at *XP references (sets or reads) any branch target
@@ -626,7 +627,7 @@ compute_out (sbitmap *bb_out, sbitmap *bb_gen, sbitmap *bb_kill, int max_uid)
      Iterate until the bb_out sets stop growing.  */
   int i;
   int changed;
-  sbitmap bb_in = sbitmap_alloc (max_uid);
+  auto_sbitmap bb_in (max_uid);
 
   for (i = NUM_FIXED_BLOCKS; i < last_basic_block_for_fn (cfun); i++)
     bitmap_copy (bb_out[i], bb_gen[i]);
@@ -642,7 +643,6 @@ compute_out (sbitmap *bb_out, sbitmap *bb_gen, sbitmap *bb_kill, int max_uid)
 					       bb_in, bb_kill[i]);
 	}
     }
-  sbitmap_free (bb_in);
 }
 
 static void
@@ -650,7 +650,7 @@ link_btr_uses (btr_def **def_array, btr_user **use_array, sbitmap *bb_out,
 	       sbitmap *btr_defset, int max_uid)
 {
   int i;
-  sbitmap reaching_defs = sbitmap_alloc (max_uid);
+  auto_sbitmap reaching_defs (max_uid);
 
   /* Link uses to the uses lists of all of their reaching defs.
      Count up the number of reaching defs of each use.  */
@@ -683,7 +683,7 @@ link_btr_uses (btr_def **def_array, btr_user **use_array, sbitmap *bb_out,
 	      if (user != NULL)
 		{
 		  /* Find all the reaching defs for this use.  */
-		  sbitmap reaching_defs_of_reg = sbitmap_alloc (max_uid);
+		  auto_sbitmap reaching_defs_of_reg (max_uid);
 		  unsigned int uid = 0;
 		  sbitmap_iterator sbi;
 
@@ -738,7 +738,6 @@ link_btr_uses (btr_def **def_array, btr_user **use_array, sbitmap *bb_out,
 		      user->next = def->uses;
 		      def->uses = user;
 		    }
-		  sbitmap_free (reaching_defs_of_reg);
 		}
 
 	      if (CALL_P (insn))
@@ -754,7 +753,6 @@ link_btr_uses (btr_def **def_array, btr_user **use_array, sbitmap *bb_out,
 	    }
 	}
     }
-  sbitmap_free (reaching_defs);
 }
 
 static void
@@ -1060,7 +1058,7 @@ combine_btr_defs (btr_def *def, HARD_REG_SET *btrs_live_in_range)
 	     target registers live over the merged range.  */
 	  int btr;
 	  HARD_REG_SET combined_btrs_live;
-	  bitmap combined_live_range = BITMAP_ALLOC (NULL);
+	  auto_bitmap combined_live_range;
 	  btr_user *user;
 
 	  if (other_def->live_range == NULL)
@@ -1118,7 +1116,6 @@ combine_btr_defs (btr_def *def, HARD_REG_SET *btrs_live_in_range)
 	      delete_insn (other_def->insn);
 
 	    }
-	  BITMAP_FREE (combined_live_range);
 	}
     }
 }
@@ -1257,7 +1254,6 @@ can_move_up (const_basic_block bb, const rtx_insn *insn, int n_insns)
 static int
 migrate_btr_def (btr_def *def, int min_cost)
 {
-  bitmap live_range;
   HARD_REG_SET btrs_live_in_range;
   int btr_used_near_def = 0;
   int def_basic_block_freq;
@@ -1291,7 +1287,7 @@ migrate_btr_def (btr_def *def, int min_cost)
     }
 
   btr_def_live_range (def, &btrs_live_in_range);
-  live_range = BITMAP_ALLOC (NULL);
+  auto_bitmap live_range;
   bitmap_copy (live_range, def->live_range);
 
 #ifdef INSN_SCHEDULING
@@ -1375,7 +1371,7 @@ migrate_btr_def (btr_def *def, int min_cost)
       if (dump_file)
 	fprintf (dump_file, "failed to move\n");
     }
-  BITMAP_FREE (live_range);
+
   return !give_up;
 }
 
@@ -1395,10 +1391,10 @@ migrate_btr_defs (enum reg_class btr_class, int allow_callee_save)
       for (i = NUM_FIXED_BLOCKS; i < last_basic_block_for_fn (cfun); i++)
 	{
 	  basic_block bb = BASIC_BLOCK_FOR_FN (cfun, i);
-	  fprintf (dump_file,
-		   "Basic block %d: count = %" PRId64
-		   " loop-depth = %d idom = %d\n",
-		   i, (int64_t) bb->count, bb_loop_depth (bb),
+	  fprintf (dump_file, "Basic block %d: count = ", i);
+	  bb->count.dump (dump_file);
+	  fprintf (dump_file, " loop-depth = %d idom = %d\n",
+		   bb_loop_depth (bb),
 		   get_immediate_dominator (CDI_DOMINATORS, bb)->index);
 	}
     }

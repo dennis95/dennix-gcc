@@ -1,5 +1,5 @@
 /* Internal functions.
-   Copyright (C) 2011-2016 Free Software Foundation, Inc.
+   Copyright (C) 2011-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -20,26 +20,28 @@ along with GCC; see the file COPYING3.  If not see
 #ifndef GCC_INTERNAL_FN_H
 #define GCC_INTERNAL_FN_H
 
-/* INTEGER_CST values for IFN_UNIQUE function arg-0.  */
+/* INTEGER_CST values for IFN_UNIQUE function arg-0.
+
+   UNSPEC: Undifferentiated UNIQUE.
+
+   FORK and JOIN mark the points at which OpenACC partitioned
+   execution is entered or exited.
+      DEP_VAR = UNIQUE ({FORK,JOIN}, DEP_VAR, AXIS)
+
+   HEAD_MARK and TAIL_MARK are used to demark the sequence entering
+   or leaving partitioned execution.
+      DEP_VAR = UNIQUE ({HEAD,TAIL}_MARK, REMAINING_MARKS, ...PRIMARY_FLAGS)
+
+   The PRIMARY_FLAGS only occur on the first HEAD_MARK of a sequence.  */
+#define IFN_UNIQUE_CODES				  \
+  DEF(UNSPEC),	\
+    DEF(OACC_FORK), DEF(OACC_JOIN),		\
+    DEF(OACC_HEAD_MARK), DEF(OACC_TAIL_MARK)
+
 enum ifn_unique_kind {
-  IFN_UNIQUE_UNSPEC,  /* Undifferentiated UNIQUE.  */
-
-  /* FORK and JOIN mark the points at which OpenACC partitioned
-     execution is entered or exited.
-     return: data dependency value
-     arg-1: data dependency var
-     arg-2: INTEGER_CST argument, indicating the axis.  */
-  IFN_UNIQUE_OACC_FORK,
-  IFN_UNIQUE_OACC_JOIN,
-
-  /* HEAD_MARK and TAIL_MARK are used to demark the sequence entering
-     or leaving partitioned execution.
-     return: data dependency value
-     arg-1: data dependency var
-     arg-2: INTEGER_CST argument, remaining markers in this sequence
-     arg-3...: varargs on primary header  */
-  IFN_UNIQUE_OACC_HEAD_MARK,
-  IFN_UNIQUE_OACC_TAIL_MARK
+#define DEF(X) IFN_UNIQUE_##X
+  IFN_UNIQUE_CODES
+#undef DEF
 };
 
 /* INTEGER_CST values for IFN_GOACC_LOOP arg-0.  Allows the precise
@@ -59,11 +61,12 @@ enum ifn_unique_kind {
      CHUNK_NO - chunk number
      MASK - partitioning mask.  */
 
+#define IFN_GOACC_LOOP_CODES \
+  DEF(CHUNKS), DEF(STEP), DEF(OFFSET), DEF(BOUND)
 enum ifn_goacc_loop_kind {
-  IFN_GOACC_LOOP_CHUNKS,  /* Number of chunks.  */
-  IFN_GOACC_LOOP_STEP,    /* Size of each thread's step.  */
-  IFN_GOACC_LOOP_OFFSET,  /* Initial iteration value.  */
-  IFN_GOACC_LOOP_BOUND    /* Limit of iteration value.  */
+#define DEF(X) IFN_GOACC_LOOP_##X
+  IFN_GOACC_LOOP_CODES
+#undef DEF
 };
 
 /* The GOACC_REDUCTION function defines a generic interface to support
@@ -81,11 +84,12 @@ enum ifn_goacc_loop_kind {
    In general the return value is LOCAL_VAR, which creates a data
    dependency between calls operating on the same reduction.  */
 
+#define IFN_GOACC_REDUCTION_CODES \
+  DEF(SETUP), DEF(INIT), DEF(FINI), DEF(TEARDOWN)
 enum ifn_goacc_reduction_kind {
-  IFN_GOACC_REDUCTION_SETUP,
-  IFN_GOACC_REDUCTION_INIT,
-  IFN_GOACC_REDUCTION_FINI,
-  IFN_GOACC_REDUCTION_TEARDOWN
+#define DEF(X) IFN_GOACC_REDUCTION_##X
+  IFN_GOACC_REDUCTION_CODES
+#undef DEF
 };
 
 /* Initialize internal function tables.  */
@@ -102,6 +106,8 @@ internal_fn_name (enum internal_fn fn)
 {
   return internal_fn_name_array[(int) fn];
 }
+
+extern internal_fn lookup_internal_fn (const char *);
 
 /* Return the ECF_* flags for function FN.  */
 
@@ -154,6 +160,17 @@ direct_internal_fn_p (internal_fn fn)
   return direct_internal_fn_array[fn].type0 >= -1;
 }
 
+/* Return true if FN is a direct internal function that can be vectorized by
+   converting the return type and all argument types to vectors of the same
+   number of elements.  E.g. we can vectorize an IFN_SQRT on floats as an
+   IFN_SQRT on vectors of N floats.  */
+
+inline bool
+vectorizable_internal_fn_p (internal_fn fn)
+{
+  return direct_internal_fn_array[fn].vectorizable;
+}
+
 /* Return optab information about internal function FN.  Only meaningful
    if direct_internal_fn_p (FN).  */
 
@@ -170,9 +187,45 @@ extern bool direct_internal_fn_supported_p (internal_fn, tree_pair,
 					    optimization_type);
 extern bool direct_internal_fn_supported_p (internal_fn, tree,
 					    optimization_type);
+extern bool direct_internal_fn_supported_p (gcall *, optimization_type);
+
+/* Return true if FN is supported for types TYPE0 and TYPE1 when the
+   optimization type is OPT_TYPE.  The types are those associated with
+   the "type0" and "type1" fields of FN's direct_internal_fn_info
+   structure.  */
+
+inline bool
+direct_internal_fn_supported_p (internal_fn fn, tree type0, tree type1,
+				optimization_type opt_type)
+{
+  return direct_internal_fn_supported_p (fn, tree_pair (type0, type1),
+					 opt_type);
+}
+
+extern int first_commutative_argument (internal_fn);
+
 extern bool set_edom_supported_p (void);
+
+extern internal_fn get_conditional_internal_fn (tree_code);
+extern internal_fn get_conditional_internal_fn (internal_fn);
+extern tree_code conditional_internal_fn_code (internal_fn);
+extern internal_fn get_unconditional_internal_fn (internal_fn);
+extern bool can_interpret_as_conditional_op_p (gimple *, tree *,
+					       tree_code *, tree (&)[3],
+					       tree *);
+
+extern bool internal_load_fn_p (internal_fn);
+extern bool internal_store_fn_p (internal_fn);
+extern bool internal_gather_scatter_fn_p (internal_fn);
+extern int internal_fn_mask_index (internal_fn);
+extern int internal_fn_stored_value_index (internal_fn);
+extern bool internal_gather_scatter_fn_supported_p (internal_fn, tree,
+						    tree, signop, int);
 
 extern void expand_internal_call (gcall *);
 extern void expand_internal_call (internal_fn, gcall *);
+extern void expand_PHI (internal_fn, gcall *);
+
+extern bool vectorized_internal_fn_supported_p (internal_fn, tree);
 
 #endif

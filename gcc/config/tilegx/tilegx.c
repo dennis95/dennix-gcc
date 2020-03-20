@@ -1,5 +1,5 @@
 /* Subroutines used for code generation on the Tilera TILE-Gx.
-   Copyright (C) 2011-2016 Free Software Foundation, Inc.
+   Copyright (C) 2011-2019 Free Software Foundation, Inc.
    Contributed by Walter Lee (walt@tilera.com)
 
    This file is part of GCC.
@@ -18,9 +18,12 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
+#include "memmodel.h"
 #include "backend.h"
 #include "target.h"
 #include "rtl.h"
@@ -29,6 +32,7 @@
 #include "df.h"
 #include "tm_p.h"
 #include "stringpool.h"
+#include "attribs.h"
 #include "expmed.h"
 #include "optabs.h"
 #include "regs.h"
@@ -105,19 +109,19 @@ tilegx_option_override (void)
 
 /* Implement TARGET_SCALAR_MODE_SUPPORTED_P.  */
 static bool
-tilegx_scalar_mode_supported_p (machine_mode mode)
+tilegx_scalar_mode_supported_p (scalar_mode mode)
 {
   switch (mode)
     {
-    case QImode:
-    case HImode:
-    case SImode:
-    case DImode:
-    case TImode:
+    case E_QImode:
+    case E_HImode:
+    case E_SImode:
+    case E_DImode:
+    case E_TImode:
       return true;
 
-    case SFmode:
-    case DFmode:
+    case E_SFmode:
+    case E_DFmode:
       return true;
 
     default:
@@ -186,7 +190,7 @@ tilegx_return_in_memory (const_tree type, const_tree fndecl ATTRIBUTE_UNUSED)
 
 /* Implement TARGET_MODE_REP_EXTENDED.  */
 static int
-tilegx_mode_rep_extended (machine_mode mode, machine_mode mode_rep)
+tilegx_mode_rep_extended (scalar_int_mode mode, scalar_int_mode mode_rep)
 {
   /* SImode register values are sign-extended to DImode.  */
   if (mode == SImode && mode_rep == DImode)
@@ -987,7 +991,7 @@ tilegx_legitimize_tls_address (rtx addr)
       case TLS_MODEL_GLOBAL_DYNAMIC:
       case TLS_MODEL_LOCAL_DYNAMIC:
 	{
-	  rtx r0, temp, temp2, temp3, got, last;
+	  rtx r0, temp, temp2, temp3, got;
 
 	  ret = gen_reg_rtx (Pmode);
 	  r0 = gen_rtx_REG (Pmode, 0);
@@ -1022,6 +1026,7 @@ tilegx_legitimize_tls_address (rtx addr)
 
 	  emit_move_insn (temp3, r0);
 
+	  rtx_insn *last;
 	  if (TARGET_32BIT)
 	    last = emit_insn (gen_tls_gd_add_32bit (ret, temp3, addr));
 	  else
@@ -1463,16 +1468,16 @@ tilegx_simd_int (rtx num, machine_mode mode)
 
   switch (mode)
     {
-    case QImode:
+    case E_QImode:
       n = 0x0101010101010101LL * (n & 0x000000FF);
       break;
-    case HImode:
+    case E_HImode:
       n = 0x0001000100010001LL * (n & 0x0000FFFF);
       break;
-    case SImode:
+    case E_SImode:
       n = 0x0000000100000001LL * (n & 0xFFFFFFFF);
       break;
-    case DImode:
+    case E_DImode:
       break;
     default:
       gcc_unreachable ();
@@ -1957,7 +1962,7 @@ tilegx_expand_unaligned_load (rtx dest_reg, rtx mem, HOST_WIDE_INT bitsize,
 	extract_bit_field (gen_lowpart (DImode, wide_result),
 			   bitsize, bit_offset % BITS_PER_UNIT,
 			   !sign, gen_lowpart (DImode, dest_reg),
-			   DImode, DImode, false);
+			   DImode, DImode, false, NULL);
 
       if (extracted != dest_reg)
 	emit_move_insn (dest_reg, gen_lowpart (DImode, extracted));
@@ -2617,9 +2622,8 @@ cbranch_predicted_p (rtx_insn *insn)
 
   if (x)
     {
-      int pred_val = XINT (x, 0);
-
-      return pred_val >= REG_BR_PROB_BASE / 2;
+      return profile_probability::from_reg_br_prob_note (XINT (x, 0))
+	     >= profile_probability::even ();
     }
 
   return false;
@@ -3880,8 +3884,8 @@ bool
 tilegx_can_use_return_insn_p (void)
 {
   return (reload_completed
-	  && cfun->static_chain_decl == 0
-	  && compute_total_frame_size () == 0
+	  && !cfun->static_chain_decl
+	  && !compute_total_frame_size ()
 	  && tilegx_current_function_is_leaf ()
 	  && !crtl->profile && !df_regs_ever_live_p (TILEGX_LINK_REGNUM));
 }
@@ -3996,8 +4000,11 @@ tilegx_expand_prologue (void)
   /* Save lr first in its special location because code after this
      might use the link register as a scratch register.  */
   if (df_regs_ever_live_p (TILEGX_LINK_REGNUM) || crtl->calls_eh_return)
-    FRP (frame_emit_store (TILEGX_LINK_REGNUM, TILEGX_LINK_REGNUM,
-			   stack_pointer_rtx, stack_pointer_rtx, 0));
+    {
+      FRP (frame_emit_store (TILEGX_LINK_REGNUM, TILEGX_LINK_REGNUM,
+			     stack_pointer_rtx, stack_pointer_rtx, 0));
+      emit_insn (gen_blockage ());
+    }
 
   if (total_size == 0)
     {
@@ -4419,15 +4426,15 @@ get_jump_target (rtx branch)
 
 /* Implement TARGET_SCHED_ADJUST_COST.  */
 static int
-tilegx_sched_adjust_cost (rtx_insn *insn, rtx link, rtx_insn *dep_insn,
-			  int cost)
+tilegx_sched_adjust_cost (rtx_insn *insn, int dep_type, rtx_insn *dep_insn,
+			  int cost, unsigned int)
 {
   /* If we have a true dependence, INSN is a call, and DEP_INSN
      defines a register that is needed by the call (argument or stack
      pointer) , set its latency to 0 so that it can be bundled with
      the call.  Explicitly check for and exclude the case when
      DEP_INSN defines the target of the jump.  */
-  if (CALL_P (insn) && REG_NOTE_KIND (link) == REG_DEP_TRUE)
+  if (CALL_P (insn) && dep_type == REG_DEP_TRUE)
     {
       rtx target = get_jump_target (insn);
       if (!REG_P (target) || !set_of (target, dep_insn))
@@ -4468,8 +4475,7 @@ tilegx_gen_bundles (void)
       rtx_insn *end = NEXT_INSN (BB_END (bb));
 
       prev = NULL;
-      for (insn = next_insn_to_bundle (BB_HEAD (bb), end); insn;
-	   prev = insn, insn = next)
+      for (insn = next_insn_to_bundle (BB_HEAD (bb), end); insn; insn = next)
 	{
 	  next = next_insn_to_bundle (NEXT_INSN (insn), end);
 
@@ -4505,7 +4511,11 @@ tilegx_gen_bundles (void)
 		PUT_MODE (prev, QImode);
 	      }
 	    delete_insn (insn);
+
+            // Note: prev remains the same for next iteration.
 	  }
+          else
+            prev = insn;
 	}
     }
 }
@@ -5055,7 +5065,7 @@ tilegx_trampoline_init (rtx m_tramp, tree fndecl, rtx static_chain)
 					      TRAMPOLINE_SIZE));
 
   emit_library_call (gen_rtx_SYMBOL_REF (Pmode, "__clear_cache"),
-		     LCT_NORMAL, VOIDmode, 2, begin_addr, Pmode,
+		     LCT_NORMAL, VOIDmode, begin_addr, Pmode,
 		     end_addr, Pmode);
 }
 
@@ -5507,6 +5517,15 @@ tilegx_function_profiler (FILE *file, int labelno ATTRIBUTE_UNUSED)
       fprintf (file, "\t}\n");
     }
 
+  if (cfun->static_chain_decl)
+    {
+      fprintf (file,
+	       "\t{\n"
+	       "\taddi\tsp, sp, -16\n"
+	       "\tst\tsp, r10\n"
+	       "\t}\n");
+    }
+
   if (flag_pic)
     {
       fprintf (file,
@@ -5524,6 +5543,13 @@ tilegx_function_profiler (FILE *file, int labelno ATTRIBUTE_UNUSED)
 	       "\t}\n", MCOUNT_NAME);
     }
 
+  if (cfun->static_chain_decl)
+    {
+      fprintf (file,
+	       "\taddi\tsp, sp, 16\n"
+	       "\tld\tr10, sp\n");
+    }
+
   tilegx_in_bundle = false;
 }
 
@@ -5536,13 +5562,25 @@ tilegx_file_end (void)
     file_end_indicate_exec_stack ();
 }
 
+/* Implement TARGET_TRULY_NOOP_TRUNCATION.  We represent all SI values
+   as sign-extended DI values in registers.  */
 
+static bool
+tilegx_truly_noop_truncation (poly_uint64 outprec, poly_uint64 inprec)
+{
+  return inprec <= 32 || outprec > 32;
+}
 
 #undef  TARGET_HAVE_TLS
 #define TARGET_HAVE_TLS HAVE_AS_TLS
 
 #undef  TARGET_OPTION_OVERRIDE
 #define TARGET_OPTION_OVERRIDE tilegx_option_override
+
+#ifdef TARGET_THREAD_SSP_OFFSET
+#undef TARGET_STACK_PROTECT_GUARD
+#define TARGET_STACK_PROTECT_GUARD hook_tree_void_null
+#endif
 
 #undef  TARGET_SCALAR_MODE_SUPPORTED_P
 #define TARGET_SCALAR_MODE_SUPPORTED_P tilegx_scalar_mode_supported_p
@@ -5625,6 +5663,9 @@ tilegx_file_end (void)
 #undef  TARGET_LEGITIMATE_CONSTANT_P
 #define TARGET_LEGITIMATE_CONSTANT_P tilegx_legitimate_constant_p
 
+#undef TARGET_LRA_P
+#define TARGET_LRA_P hook_bool_void_false
+
 #undef  TARGET_LEGITIMATE_ADDRESS_P
 #define TARGET_LEGITIMATE_ADDRESS_P tilegx_legitimate_address_p
 
@@ -5691,6 +5732,12 @@ tilegx_file_end (void)
 
 #undef  TARGET_CAN_USE_DOLOOP_P
 #define TARGET_CAN_USE_DOLOOP_P can_use_doloop_if_innermost
+
+#undef  TARGET_TRULY_NOOP_TRUNCATION
+#define TARGET_TRULY_NOOP_TRUNCATION tilegx_truly_noop_truncation
+
+#undef  TARGET_CONSTANT_ALIGNMENT
+#define TARGET_CONSTANT_ALIGNMENT constant_alignment_word_strings
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

@@ -1,5 +1,5 @@
 /* Generate code from machine description to perform peephole optimizations.
-   Copyright (C) 1987-2016 Free Software Foundation, Inc.
+   Copyright (C) 1987-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -306,6 +306,9 @@ match_rtx (rtx x, struct link *path, int fail_label)
 	  printf ("  if (strcmp (XSTR (x, %d), \"%s\")) goto L%d;\n",
 		  i, XSTR (x, i), fail_label);
 	}
+      else if (fmt[i] == 'p')
+	/* Not going to support subregs for legacy define_peeholes.  */
+	gcc_unreachable ();
     }
 }
 
@@ -340,10 +343,10 @@ print_code (RTX_CODE code)
     putchar (TOUPPER (*p1));
 }
 
-extern int main (int, char **);
+extern int main (int, const char **);
 
 int
-main (int argc, char **argv)
+main (int argc, const char **argv)
 {
   max_opno = -1;
 
@@ -355,6 +358,7 @@ main (int argc, char **argv)
   printf ("/* Generated automatically by the program `genpeep'\n\
 from the machine description file `md'.  */\n\n");
 
+  printf ("#define IN_TARGET_CODE 1\n");
   printf ("#include \"config.h\"\n");
   printf ("#include \"system.h\"\n");
   printf ("#include \"coretypes.h\"\n");
@@ -366,6 +370,7 @@ from the machine description file `md'.  */\n\n");
   printf ("#include \"varasm.h\"\n");
   printf ("#include \"stor-layout.h\"\n");
   printf ("#include \"calls.h\"\n");
+  printf ("#include \"memmodel.h\"\n");
   printf ("#include \"tm_p.h\"\n");
   printf ("#include \"regs.h\"\n");
   printf ("#include \"output.h\"\n");

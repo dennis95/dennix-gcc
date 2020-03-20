@@ -298,6 +298,8 @@ BEGIN {
   cnt=0
   print_using=0
   need_close=0
+  has_timeout=0
+  timeout_cnt=0
 }
 /^EXPFILE: / {
   expfiles[expfileno] = \$2
@@ -329,18 +331,46 @@ BEGIN {
   # Ugly hack for gfortran.dg/dg.exp
   if ("$TOOL" == "gfortran" && testname ~ /^gfortran.dg\/g77\//)
     testname="h"testname
+  if ("$MODE" == "sum") {
+    if (\$0 ~ /^WARNING: program timed out/) {
+      has_timeout=1
+      timeout_cnt=cnt+1
+    } else {
+      # Prepare timeout replacement message in case it's needed
+      timeout_msg=\$0
+      sub(\$1, "WARNING:", timeout_msg)
+    }
+  }
 }
 /^$/ { if ("$MODE" == "sum") next }
 { if (variant == curvar && curfile) {
     if ("$MODE" == "sum") {
-      printf "%s %08d|", testname, cnt >> curfile
-      cnt = cnt + 1
+      # Do not print anything if the current line is a timeout
+      if (has_timeout == 0) {
+	# If the previous line was a timeout,
+	# insert the full current message without keyword
+	if (timeout_cnt != 0) {
+	  printf "%s %08d|%s program timed out.\n", testname, timeout_cnt-1, timeout_msg >> curfile
+	  timeout_cnt = 0
+	  cnt = cnt + 1
+	}
+	printf "%s %08d|", testname, cnt >> curfile
+	cnt = cnt + 1
+	filewritten[curfile]=1
+	need_close=1
+	print >> curfile
+      }
+      has_timeout=0
+    } else {
+      filewritten[curfile]=1
+      need_close=1
+      print >> curfile
     }
-    filewritten[curfile]=1
-    need_close=1
-    print >> curfile
-  } else
+  } else {
+    has_timeout=0
+    timeout_cnt=0
     next
+  }
 }
 END {
   n=1
@@ -369,10 +399,11 @@ EOF
 BEGIN {
   variant="$VAR"
   tool="$TOOL"
-  passcnt=0; failcnt=0; untstcnt=0; xpasscnt=0; xfailcnt=0; kpasscnt=0; kfailcnt=0; unsupcnt=0; unrescnt=0;
+  passcnt=0; failcnt=0; untstcnt=0; xpasscnt=0; xfailcnt=0; kpasscnt=0; kfailcnt=0; unsupcnt=0; unrescnt=0; dgerrorcnt=0;
   curvar=""; insummary=0
 }
 /^Running target /		{ curvar = \$3; next }
+/^ERROR: \(DejaGnu\)/		{ if (variant == curvar) dgerrorcnt += 1 }
 /^# of /			{ if (variant == curvar) insummary = 1 }
 /^# of expected passes/		{ if (insummary == 1) passcnt += \$5; next; }
 /^# of unexpected successes/	{ if (insummary == 1) xpasscnt += \$5; next; }
@@ -390,6 +421,7 @@ BEGIN {
 { next }
 END {
   printf ("\t\t=== %s Summary for %s ===\n\n", tool, variant)
+  if (dgerrorcnt != 0) printf ("# of DejaGnu errors\t\t%d\n", dgerrorcnt)
   if (passcnt != 0) printf ("# of expected passes\t\t%d\n", passcnt)
   if (failcnt != 0) printf ("# of unexpected failures\t%d\n", failcnt)
   if (xpasscnt != 0) printf ("# of unexpected successes\t%d\n", xpasscnt)
@@ -419,8 +451,9 @@ TOTAL_AWK=${TMP}/total.awk
 cat << EOF > $TOTAL_AWK
 BEGIN {
   tool="$TOOL"
-  passcnt=0; failcnt=0; untstcnt=0; xpasscnt=0; xfailcnt=0; kfailcnt=0; unsupcnt=0; unrescnt=0
+  passcnt=0; failcnt=0; untstcnt=0; xpasscnt=0; xfailcnt=0; kfailcnt=0; unsupcnt=0; unrescnt=0; dgerrorcnt=0
 }
+/^# of DejaGnu errors/		{ dgerrorcnt += \$5 }
 /^# of expected passes/		{ passcnt += \$5 }
 /^# of unexpected failures/	{ failcnt += \$5 }
 /^# of unexpected successes/	{ xpasscnt += \$5 }
@@ -432,6 +465,7 @@ BEGIN {
 /^# of unsupported tests/	{ unsupcnt += \$5 }
 END {
   printf ("\n\t\t=== %s Summary ===\n\n", tool)
+  if (dgerrorcnt != 0) printf ("# of DejaGnu errors\t\t%d\n", dgerrorcnt)
   if (passcnt != 0) printf ("# of expected passes\t\t%d\n", passcnt)
   if (failcnt != 0) printf ("# of unexpected failures\t%d\n", failcnt)
   if (xpasscnt != 0) printf ("# of unexpected successes\t%d\n", xpasscnt)

@@ -1,7 +1,6 @@
 # Process this file with autoconf to produce a configure script, like so:
 # aclocal && autoconf && autoheader && automake
 
-AC_PREREQ(2.64)
 AC_INIT([GNU Fortran Runtime Library], 0.3,,[libgfortran])
 AC_CONFIG_HEADER(config.h)
 GCC_TOPLEV_SUBDIRS
@@ -147,6 +146,13 @@ if test "x$GCC" = "xyes"; then
   ## that we'll encounter when compiling our own source files.
   CFLAGS="-std=gnu11 $CFLAGS"
 fi
+
+# Add CET specific flags if CET is enabled
+GCC_CET_FLAGS(CET_FLAGS)
+AM_FCFLAGS="$AM_FCFLAGS $CET_FLAGS"
+AM_CFLAGS="$AM_CFLAGS $CET_FLAGS"
+CFLAGS="$CFLAGS $CET_FLAGS"
+
 AC_SUBST(AM_FCFLAGS)
 AC_SUBST(AM_CFLAGS)
 AC_SUBST(CFLAGS)
@@ -199,7 +205,8 @@ AM_CONDITIONAL(LIBGFOR_USE_SYMVER_SUN, [test "x$gfortran_use_symver" = xsun])
 # * C library support for other features such as signal, environment
 #   variables, time functions
 
-AM_CONDITIONAL(LIBGFOR_MINIMAL, [test "x${target_cpu}" = xnvptx])
+AM_CONDITIONAL(LIBGFOR_MINIMAL, [test "x${target_cpu}" = xnvptx \
+				 || test "x${target_cpu}" = xamdgcn])
 
 # Figure out whether the compiler supports "-ffunction-sections -fdata-sections",
 # similarly to how libstdc++ does it
@@ -221,6 +228,9 @@ if test x"$ac_fdsections" = x"yes"; then
 fi
 AC_MSG_RESULT($ac_fdsections)
 AC_SUBST(SECTION_FLAGS)
+
+# Check linker hardware capability support.
+GCC_CHECK_LINKER_HWCAP
 
 # Find other programs we need.
 AC_CHECK_TOOL(AS, as)
@@ -265,8 +275,9 @@ AC_TYPE_UINTPTR_T
 AC_CHECK_TYPES([ptrdiff_t])
 
 # check header files (we assume C89 is available, so don't check for that)
-AC_CHECK_HEADERS_ONCE(unistd.h sys/time.h sys/times.h sys/resource.h \
-sys/types.h sys/stat.h sys/wait.h floatingpoint.h ieeefp.h fenv.h fptrap.h \
+AC_CHECK_HEADERS_ONCE(unistd.h sys/random.h sys/time.h sys/times.h \
+sys/resource.h sys/types.h sys/stat.h sys/uio.h sys/wait.h \
+floatingpoint.h ieeefp.h fenv.h fptrap.h \
 fpxcp.h pwd.h complex.h xlocale.h)
 
 GCC_HEADER_STDINT(gstdint.h)
@@ -275,6 +286,8 @@ AC_CHECK_MEMBERS([struct stat.st_blksize, struct stat.st_blocks, struct stat.st_
 
 case "${host}--x${with_newlib}" in
   mips*--xyes)
+    hardwire_newlib=1;;
+  nvptx*--xyes)
     hardwire_newlib=1;;
 esac
 
@@ -300,8 +313,9 @@ if test "${hardwire_newlib:-0}" -eq 1; then
    fi
 else
    AC_CHECK_FUNCS_ONCE(getrusage times mkstemp strtof strtold snprintf \
-   ftruncate chsize chdir getlogin gethostname kill link symlink sleep ttyname \
-   alarm access fork setmode fcntl \
+   ftruncate chsize chdir getentropy getlogin gethostname kill link symlink \
+   sleep ttyname sigaction waitpid \
+   alarm access fork posix_spawn setmode fcntl writev \
    gettimeofday stat fstat lstat getpwuid vsnprintf dup \
    getcwd localtime_r gmtime_r getpwuid_r ttyname_r clock_gettime \
    getgid getpid getuid geteuid umask getegid \
@@ -551,6 +565,9 @@ AC_CHECK_FUNC([fpresetsticky],[have_fpresetsticky=yes AC_DEFINE([HAVE_FPRESETSTI
 AC_CHECK_FUNC([fp_trap],[have_fp_trap=yes AC_DEFINE([HAVE_FP_TRAP],[1],[fp_trap is present])])
 AC_CHECK_FUNC([fp_enable],[have_fp_enable=yes AC_DEFINE([HAVE_FP_ENABLE],[1],[fp_enable is present])])
 
+# Check if _SOFT_FLOAT is defined
+AC_CHECK_DEFINE([_SOFT_FLOAT],[have_soft_float=yes])
+
 # Runs configure.host to set up necessary host-dependent shell variables.
 # We then display a message about it, and propagate them through the
 # build chain.
@@ -592,8 +609,8 @@ fi
 LIBGFOR_CHECK_ATTRIBUTE_VISIBILITY
 LIBGFOR_CHECK_ATTRIBUTE_ALIAS
 
-# Check out sync builtins support.
-LIBGFOR_CHECK_SYNC_FETCH_AND_ADD
+# Check out atomic builtins support.
+LIBGFOR_CHECK_ATOMIC_FETCH_ADD
 
 # Check out #pragma weak.
 LIBGFOR_GTHREAD_WEAK
@@ -606,6 +623,27 @@ LIBGFOR_CHECK_UNLINK_OPEN_FILE
 
 # Check whether line terminator is LF or CRLF
 LIBGFOR_CHECK_CRLF
+
+# Check whether we support AVX extensions
+LIBGFOR_CHECK_AVX
+
+# Check wether we support AVX2 extensions
+LIBGFOR_CHECK_AVX2
+
+# Check wether we support AVX512f extensions
+LIBGFOR_CHECK_AVX512F
+
+# Check for FMA3 extensions
+LIBGFOR_CHECK_FMA3
+
+# Check for FMA4 extensions
+LIBGFOR_CHECK_FMA4
+
+# Check if AVX128 works
+LIBGFOR_CHECK_AVX128
+
+# Determine what GCC version number to use in filesystem paths.
+GCC_BASE_VER
 
 AC_CACHE_SAVE
 

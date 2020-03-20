@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"io/ioutil"
 	"reflect"
 	"strings"
 	"testing"
@@ -52,6 +53,71 @@ func TestBasicEncoderDecoder(t *testing.T) {
 			t.Fatalf("%T: expected %v got %v", value, value, result.Elem().Interface())
 		}
 	}
+}
+
+func TestEncodeIntSlice(t *testing.T) {
+
+	s8 := []int8{1, 5, 12, 22, 35, 51, 70, 92, 117}
+	s16 := []int16{145, 176, 210, 247, 287, 330, 376, 425, 477}
+	s32 := []int32{532, 590, 651, 715, 782, 852, 925, 1001, 1080}
+	s64 := []int64{1162, 1247, 1335, 1426, 1520, 1617, 1717, 1820, 1926}
+
+	t.Run("int8", func(t *testing.T) {
+		var sink bytes.Buffer
+		enc := NewEncoder(&sink)
+		enc.Encode(s8)
+
+		dec := NewDecoder(&sink)
+		res := make([]int8, 9)
+		dec.Decode(&res)
+
+		if !reflect.DeepEqual(s8, res) {
+			t.Fatalf("EncodeIntSlice: expected %v, got %v", s8, res)
+		}
+	})
+
+	t.Run("int16", func(t *testing.T) {
+		var sink bytes.Buffer
+		enc := NewEncoder(&sink)
+		enc.Encode(s16)
+
+		dec := NewDecoder(&sink)
+		res := make([]int16, 9)
+		dec.Decode(&res)
+
+		if !reflect.DeepEqual(s16, res) {
+			t.Fatalf("EncodeIntSlice: expected %v, got %v", s16, res)
+		}
+	})
+
+	t.Run("int32", func(t *testing.T) {
+		var sink bytes.Buffer
+		enc := NewEncoder(&sink)
+		enc.Encode(s32)
+
+		dec := NewDecoder(&sink)
+		res := make([]int32, 9)
+		dec.Decode(&res)
+
+		if !reflect.DeepEqual(s32, res) {
+			t.Fatalf("EncodeIntSlice: expected %v, got %v", s32, res)
+		}
+	})
+
+	t.Run("int64", func(t *testing.T) {
+		var sink bytes.Buffer
+		enc := NewEncoder(&sink)
+		enc.Encode(s64)
+
+		dec := NewDecoder(&sink)
+		res := make([]int64, 9)
+		dec.Decode(&res)
+
+		if !reflect.DeepEqual(s64, res) {
+			t.Fatalf("EncodeIntSlice: expected %v, got %v", s64, res)
+		}
+	})
+
 }
 
 type ET0 struct {
@@ -280,7 +346,7 @@ func TestValueError(t *testing.T) {
 	}
 	t4p := &Type4{3}
 	var t4 Type4 // note: not a pointer.
-	if err := encAndDec(t4p, t4); err == nil || strings.Index(err.Error(), "pointer") < 0 {
+	if err := encAndDec(t4p, t4); err == nil || !strings.Contains(err.Error(), "pointer") {
 		t.Error("expected error about pointer; got", err)
 	}
 }
@@ -388,7 +454,7 @@ func TestSingletons(t *testing.T) {
 			t.Errorf("expected error decoding %v: %s", test.in, test.err)
 			continue
 		case err != nil && test.err != "":
-			if strings.Index(err.Error(), test.err) < 0 {
+			if !strings.Contains(err.Error(), test.err) {
 				t.Errorf("wrong error decoding %v: wanted %s, got %v", test.in, test.err, err)
 			}
 			continue
@@ -414,7 +480,7 @@ func TestStructNonStruct(t *testing.T) {
 	var ns NonStruct
 	if err := encAndDec(s, &ns); err == nil {
 		t.Error("should get error for struct/non-struct")
-	} else if strings.Index(err.Error(), "type") < 0 {
+	} else if !strings.Contains(err.Error(), "type") {
 		t.Error("for struct/non-struct expected type error; got", err)
 	}
 	// Now try the other way
@@ -424,7 +490,7 @@ func TestStructNonStruct(t *testing.T) {
 	}
 	if err := encAndDec(ns, &s); err == nil {
 		t.Error("should get error for non-struct/struct")
-	} else if strings.Index(err.Error(), "type") < 0 {
+	} else if !strings.Contains(err.Error(), "type") {
 		t.Error("for non-struct/struct expected type error; got", err)
 	}
 }
@@ -439,8 +505,8 @@ func (this *interfaceIndirectTestT) F() bool {
 	return true
 }
 
-// A version of a bug reported on golang-nuts.  Also tests top-level
-// slice of interfaces.  The issue was registering *T caused T to be
+// A version of a bug reported on golang-nuts. Also tests top-level
+// slice of interfaces. The issue was registering *T caused T to be
 // stored as the concrete type.
 func TestInterfaceIndirect(t *testing.T) {
 	Register(&interfaceIndirectTestT{})
@@ -463,7 +529,7 @@ func TestInterfaceIndirect(t *testing.T) {
 
 // Also, when the ignored object contains an interface value, it may define
 // types. Make sure that skipping the value still defines the types by using
-// the encoder/decoder pair to send a value afterwards.  If an interface
+// the encoder/decoder pair to send a value afterwards. If an interface
 // is sent, its type in the test is always NewType0, so this checks that the
 // encoder and decoder don't skew with respect to type definitions.
 
@@ -602,10 +668,6 @@ type Bug1Elem struct {
 }
 
 type Bug1StructMap map[string]Bug1Elem
-
-func bug1EncDec(in Bug1StructMap, out *Bug1StructMap) error {
-	return nil
-}
 
 func TestMapBug1(t *testing.T) {
 	in := make(Bug1StructMap)
@@ -833,30 +895,95 @@ func TestPtrToMapOfMap(t *testing.T) {
 	}
 }
 
+// Test that untyped nils generate an error, not a panic.
+// See Issue 16204.
+func TestCatchInvalidNilValue(t *testing.T) {
+	encodeErr, panicErr := encodeAndRecover(nil)
+	if panicErr != nil {
+		t.Fatalf("panicErr=%v, should not panic encoding untyped nil", panicErr)
+	}
+	if encodeErr == nil {
+		t.Errorf("got err=nil, want non-nil error when encoding untyped nil value")
+	} else if !strings.Contains(encodeErr.Error(), "nil value") {
+		t.Errorf("expected 'nil value' error; got err=%v", encodeErr)
+	}
+}
+
 // A top-level nil pointer generates a panic with a helpful string-valued message.
 func TestTopLevelNilPointer(t *testing.T) {
-	errMsg := topLevelNilPanic(t)
-	if errMsg == "" {
+	var ip *int
+	encodeErr, panicErr := encodeAndRecover(ip)
+	if encodeErr != nil {
+		t.Fatal("error in encode:", encodeErr)
+	}
+	if panicErr == nil {
 		t.Fatal("top-level nil pointer did not panic")
 	}
+	errMsg := panicErr.Error()
 	if !strings.Contains(errMsg, "nil pointer") {
 		t.Fatal("expected nil pointer error, got:", errMsg)
 	}
 }
 
-func topLevelNilPanic(t *testing.T) (panicErr string) {
+func encodeAndRecover(value interface{}) (encodeErr, panicErr error) {
 	defer func() {
 		e := recover()
-		if err, ok := e.(string); ok {
-			panicErr = err
+		if e != nil {
+			switch err := e.(type) {
+			case error:
+				panicErr = err
+			default:
+				panicErr = fmt.Errorf("%v", err)
+			}
 		}
 	}()
-	var ip *int
-	buf := new(bytes.Buffer)
-	if err := NewEncoder(buf).Encode(ip); err != nil {
-		t.Fatal("error in encode:", err)
-	}
+
+	encodeErr = NewEncoder(ioutil.Discard).Encode(value)
 	return
+}
+
+func TestNilPointerPanics(t *testing.T) {
+	var (
+		nilStringPtr      *string
+		intMap            = make(map[int]int)
+		intMapPtr         = &intMap
+		nilIntMapPtr      *map[int]int
+		zero              int
+		nilBoolChannel    chan bool
+		nilBoolChannelPtr *chan bool
+		nilStringSlice    []string
+		stringSlice       = make([]string, 1)
+		nilStringSlicePtr *[]string
+	)
+
+	testCases := []struct {
+		value     interface{}
+		mustPanic bool
+	}{
+		{nilStringPtr, true},
+		{intMap, false},
+		{intMapPtr, false},
+		{nilIntMapPtr, true},
+		{zero, false},
+		{nilStringSlice, false},
+		{stringSlice, false},
+		{nilStringSlicePtr, true},
+		{nilBoolChannel, false},
+		{nilBoolChannelPtr, true},
+	}
+
+	for _, tt := range testCases {
+		_, panicErr := encodeAndRecover(tt.value)
+		if tt.mustPanic {
+			if panicErr == nil {
+				t.Errorf("expected panic with input %#v, did not panic", tt.value)
+			}
+			continue
+		}
+		if panicErr != nil {
+			t.Fatalf("expected no panic with input %#v, got panic=%v", tt.value, panicErr)
+		}
+	}
 }
 
 func TestNilPointerInsideInterface(t *testing.T) {
@@ -887,7 +1014,7 @@ type Bug4Secret struct {
 }
 
 // Test that a failed compilation doesn't leave around an executable encoder.
-// Issue 3273.
+// Issue 3723.
 func TestMutipleEncodingsOfBadType(t *testing.T) {
 	x := Bug4Public{
 		Name:   "name",
@@ -913,7 +1040,7 @@ func TestMutipleEncodingsOfBadType(t *testing.T) {
 // There was an error check comparing the length of the input with the
 // length of the slice being decoded. It was wrong because the next
 // thing in the input might be a type definition, which would lead to
-// an incorrect length check.  This test reproduces the corner case.
+// an incorrect length check. This test reproduces the corner case.
 
 type Z struct {
 }
@@ -998,23 +1125,5 @@ func TestBadData(t *testing.T) {
 		if !strings.Contains(err.Error(), test.error) {
 			t.Errorf("#%d: decode: expected %q error, got %s", i, test.error, err.Error())
 		}
-	}
-}
-
-// TestHugeWriteFails tests that enormous messages trigger an error.
-func TestHugeWriteFails(t *testing.T) {
-	if testing.Short() {
-		// Requires allocating a monster, so don't do this from all.bash.
-		t.Skip("skipping huge allocation in short mode")
-	}
-	huge := make([]byte, tooBig)
-	huge[0] = 7 // Make sure it's not all zeros.
-	buf := new(bytes.Buffer)
-	err := NewEncoder(buf).Encode(huge)
-	if err == nil {
-		t.Fatalf("expected error for huge slice")
-	}
-	if !strings.Contains(err.Error(), "message too big") {
-		t.Fatalf("expected 'too big' error; got %s\n", err.Error())
 	}
 }

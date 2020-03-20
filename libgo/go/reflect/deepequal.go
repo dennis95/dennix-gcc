@@ -9,7 +9,7 @@ package reflect
 import "unsafe"
 
 // During deepValueEqual, must keep track of checks that are
-// in progress.  The comparison algorithm assumes that all
+// in progress. The comparison algorithm assumes that all
 // checks in progress are true when it reencounters them.
 // Visited comparisons are stored in a map indexed by visit.
 type visit struct {
@@ -30,9 +30,13 @@ func deepValueEqual(v1, v2 Value, visited map[visit]bool, depth int) bool {
 	}
 
 	// if depth > 10 { panic("deepValueEqual") }	// for debugging
+
+	// We want to avoid putting more in the visited map than we need to.
+	// For any possible reference cycle that might be encountered,
+	// hard(t) needs to return true for at least one of the types in the cycle.
 	hard := func(k Kind) bool {
 		switch k {
-		case Array, Map, Slice, Struct:
+		case Map, Slice, Ptr, Interface:
 			return true
 		}
 		return false
@@ -112,7 +116,7 @@ func deepValueEqual(v1, v2 Value, visited map[visit]bool, depth int) bool {
 		for _, k := range v1.MapKeys() {
 			val1 := v1.MapIndex(k)
 			val2 := v2.MapIndex(k)
-			if !val1.IsValid() || !val2.IsValid() || !deepValueEqual(v1.MapIndex(k), v2.MapIndex(k), visited, depth+1) {
+			if !val1.IsValid() || !val2.IsValid() || !deepValueEqual(val1, val2, visited, depth+1) {
 				return false
 			}
 		}
@@ -142,8 +146,9 @@ func deepValueEqual(v1, v2 Value, visited map[visit]bool, depth int) bool {
 //
 // Interface values are deeply equal if they hold deeply equal concrete values.
 //
-// Map values are deeply equal if they are the same map object
-// or if they have the same length and their corresponding keys
+// Map values are deeply equal when all of the following are true:
+// they are both nil or both non-nil, they have the same length,
+// and either they are the same map object or their corresponding keys
 // (matched using Go equality) map to deeply equal values.
 //
 // Pointer values are deeply equal if they are equal using Go's == operator
@@ -173,6 +178,12 @@ func deepValueEqual(v1, v2 Value, visited map[visit]bool, depth int) bool {
 // DeepEqual has been defined so that the same short-cut applies
 // to slices and maps: if x and y are the same slice or the same map,
 // they are deeply equal regardless of content.
+//
+// As DeepEqual traverses the data values it may find a cycle. The
+// second and subsequent times that DeepEqual compares two pointer
+// values that have been compared before, it treats the values as
+// equal rather than examining the values to which they point.
+// This ensures that DeepEqual terminates.
 func DeepEqual(x, y interface{}) bool {
 	if x == nil || y == nil {
 		return x == y

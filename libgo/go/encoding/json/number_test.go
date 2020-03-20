@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -10,7 +10,7 @@ import (
 )
 
 func TestNumberIsValid(t *testing.T) {
-	// From: http://stackoverflow.com/a/13340826
+	// From: https://stackoverflow.com/a/13340826
 	var jsonNumberRegexp = regexp.MustCompile(`^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$`)
 
 	validTests := []string{

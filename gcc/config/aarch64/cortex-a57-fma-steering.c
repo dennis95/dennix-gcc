@@ -1,5 +1,5 @@
 /* FMA steering optimization pass for Cortex-A57.
-   Copyright (C) 2015-2016 Free Software Foundation, Inc.
+   Copyright (C) 2015-2019 Free Software Foundation, Inc.
    Contributed by ARM Ltd.
 
    This file is part of GCC.
@@ -18,6 +18,8 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #define INCLUDE_LIST
 #include "system.h"
@@ -28,6 +30,7 @@
 #include "df.h"
 #include "insn-config.h"
 #include "regs.h"
+#include "memmodel.h"
 #include "emit-rtl.h"
 #include "recog.h"
 #include "cfganal.h"
@@ -35,7 +38,6 @@
 #include "context.h"
 #include "tree-pass.h"
 #include "regrename.h"
-#include "cortex-a57-fma-steering.h"
 #include "aarch64-protos.h"
 
 /* For better performance, the destination of FMADD/FMSUB instructions should
@@ -112,6 +114,9 @@ public:
   void dispatch ();
 
 private:
+  /* Prohibit copy construction.  */
+  fma_forest (const fma_forest &);
+
   /* The list of roots that form this forest.  */
   std::list<fma_root_node *> *m_roots;
 
@@ -145,6 +150,10 @@ public:
   void set_head (du_head *);
   void rename (fma_forest *);
   void dump_info (fma_forest *);
+
+private:
+  /* Prohibit copy construction.  */
+  fma_node (const fma_node &);
 
 protected:
   /* Root node that lead to this node.  */
@@ -201,6 +210,9 @@ public:
   void execute_fma_steering ();
 
 private:
+  /* Prohibit copy construction.  */
+  func_fma_steering (const func_fma_steering &);
+
   void dfs (void (*) (fma_forest *), void (*) (fma_forest *, fma_root_node *),
 	    void (*) (fma_forest *, fma_node *), bool);
   void analyze ();
@@ -404,16 +416,16 @@ fma_forest::merge_forest (fma_forest *other_forest)
 
   /* Update root nodes' pointer to forest.  */
   for (other_root_iter = other_roots->begin ();
-       other_root_iter != other_roots->end (); other_root_iter++)
+       other_root_iter != other_roots->end (); ++other_root_iter)
     (*other_root_iter)->set_forest (this);
 
   /* Remove other_forest from the list of forests and move its tree roots in
      the list of tree roots of ref_forest.  */
   this->m_globals->remove_forest (other_forest);
   this->m_roots->splice (this->m_roots->begin (), *other_roots);
-  delete other_forest;
-
   this->m_nb_nodes += other_forest->m_nb_nodes;
+
+  delete other_forest;
 }
 
 /* Dump information about the forest FOREST.  */
@@ -603,7 +615,7 @@ fma_node::rename (fma_forest *forest)
     {
       rtx_insn *insn = this->m_insn;
       HARD_REG_SET unavailable;
-      enum machine_mode mode;
+      machine_mode mode;
       int reg;
 
       if (dump_file)
@@ -845,14 +857,13 @@ func_fma_steering::dfs (void (*process_forest) (fma_forest *),
 			void (*process_node) (fma_forest *, fma_node *),
 			bool free)
 {
-  vec<fma_node *> to_process;
+  auto_vec<fma_node *> to_process;
+  auto_vec<fma_node *> to_free;
   std::list<fma_forest *>::iterator forest_iter;
-
-  to_process.create (0);
 
   /* For each forest.  */
   for (forest_iter = this->m_fma_forests.begin ();
-       forest_iter != this->m_fma_forests.end (); forest_iter++)
+       forest_iter != this->m_fma_forests.end (); ++forest_iter)
     {
       std::list<fma_root_node *>::iterator root_iter;
 
@@ -861,7 +872,7 @@ func_fma_steering::dfs (void (*process_forest) (fma_forest *),
 
       /* For each tree root in this forest.  */
       for (root_iter = (*forest_iter)->get_roots ()->begin ();
-	   root_iter != (*forest_iter)->get_roots ()->end (); root_iter++)
+	   root_iter != (*forest_iter)->get_roots ()->end (); ++root_iter)
 	{
 	  if (process_root)
 	    process_root (*forest_iter, *root_iter);
@@ -879,28 +890,30 @@ func_fma_steering::dfs (void (*process_forest) (fma_forest *),
 	  if (process_node)
 	    process_node (*forest_iter, node);
 
-	  /* Absence of children might indicate an alternate root of a *chain*.
-	     It's ok to skip it here as the chain will be renamed when
-	     processing the canonical root for that chain.  */
-	  if (node->get_children ()->empty ())
-	    continue;
-
 	  for (child_iter = node->get_children ()->begin ();
-	       child_iter != node->get_children ()->end (); child_iter++)
+	       child_iter != node->get_children ()->end (); ++child_iter)
 	    to_process.safe_push (*child_iter);
+
+	  /* Defer freeing so that the process_node callback can access the
+	     parent and children of the node being processed.  */
 	  if (free)
+	    to_free.safe_push (node);
+	}
+
+      if (free)
+	{
+	  delete *forest_iter;
+
+	  while (!to_free.is_empty ())
 	    {
+	      fma_node *node = to_free.pop ();
 	      if (node->root_p ())
 		delete static_cast<fma_root_node *> (node);
 	      else
 		delete node;
 	    }
 	}
-      if (free)
-	delete *forest_iter;
     }
-
-  to_process.release ();
 }
 
 /* Build the dependency trees of FMUL and FMADD/FMSUB instructions.  */
@@ -923,10 +936,10 @@ func_fma_steering::analyze ()
       FOR_BB_INSNS (bb, insn)
 	{
 	  operand_rr_info *dest_op_info;
-	  struct du_chain *chain;
+	  struct du_chain *chain = NULL;
 	  unsigned dest_regno;
-	  fma_forest *forest;
-	  du_head_p head;
+	  fma_forest *forest = NULL;
+	  du_head_p head = NULL;
 	  int i;
 
 	  if (!is_fmul_fmac_insn (insn, true))
@@ -973,10 +986,17 @@ func_fma_steering::analyze ()
 		break;
 	    }
 
-	  /* We didn't find a chain with a def for this instruction.  */
-	  gcc_assert (i < dest_op_info->n_chains);
-
-	  this->analyze_fma_fmul_insn (forest, chain, head);
+	  /* Due to implementation of regrename, dest register can slip away
+	     from regrename's analysis.  As a result, there is no chain for
+	     the destination register of insn.  We simply skip the insn even
+	     it is a fmul/fmac instruction.  This can happen when the dest
+	     register is also a source register of insn and one of the below
+	     conditions is satisfied:
+	       1) the source reg is setup in larger mode than this insn;
+	       2) the source reg is uninitialized;
+	       3) the source reg is passed in as parameter.  */
+	  if (i < dest_op_info->n_chains)
+	    this->analyze_fma_fmul_insn (forest, chain, head);
 	}
     }
   free (bb_dfs_preorder);
@@ -1068,21 +1088,8 @@ public:
 
 /* Create a new fma steering pass instance.  */
 
-static rtl_opt_pass *
+rtl_opt_pass *
 make_pass_fma_steering (gcc::context *ctxt)
 {
   return new pass_fma_steering (ctxt);
-}
-
-/* Register the FMA steering pass to the pass manager.  */
-
-void
-aarch64_register_fma_steering ()
-{
-  opt_pass *pass_fma_steering = make_pass_fma_steering (g);
-
-  struct register_pass_info fma_steering_info
-    = { pass_fma_steering, "rnreg", 1, PASS_POS_INSERT_AFTER };
-
-  register_pass (&fma_steering_info);
 }

@@ -1,5 +1,5 @@
 /* Generate code from machine description to recognize rtl as insns.
-   Copyright (C) 1987-2016 Free Software Foundation, Inc.
+   Copyright (C) 1987-2019 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -388,7 +388,7 @@ find_operand (rtx pattern, int n, rtx stop)
 	      return r;
 	  break;
 
-	case 'i': case 'r': case 'w': case '0': case 's':
+	case 'r': case 'p': case 'i': case 'w': case '0': case 's':
 	  break;
 
 	default:
@@ -439,7 +439,7 @@ find_matching_operand (rtx pattern, int n)
 	      return r;
 	  break;
 
-	case 'i': case 'r': case 'w': case '0': case 's':
+	case 'r': case 'p': case 'i': case 'w': case '0': case 's':
 	  break;
 
 	default:
@@ -461,6 +461,38 @@ constraints_supported_in_insn_p (rtx insn)
   return !(GET_CODE (insn) == DEFINE_EXPAND
 	   || GET_CODE (insn) == DEFINE_SPLIT
 	   || GET_CODE (insn) == DEFINE_PEEPHOLE2);
+}
+
+/* Return the name of the predicate matched by MATCH_RTX.  */
+
+static const char *
+predicate_name (rtx match_rtx)
+{
+  if (GET_CODE (match_rtx) == MATCH_SCRATCH)
+    return "scratch_operand";
+  else
+    return XSTR (match_rtx, 1);
+}
+
+/* Return true if OPERAND is a MATCH_OPERAND using a special predicate
+   function.  */
+
+static bool
+special_predicate_operand_p (rtx operand)
+{
+  if (GET_CODE (operand) == MATCH_OPERAND)
+    {
+      const char *pred_name = predicate_name (operand);
+      if (pred_name[0] != 0)
+	{
+	  const struct pred_data *pred;
+
+	  pred = lookup_predicate (pred_name);
+	  return pred != NULL && pred->special;
+	}
+    }
+
+  return false;
 }
 
 /* Check for various errors in PATTERN, which is part of INFO.
@@ -651,10 +683,9 @@ validate_pattern (rtx pattern, md_rtx_info *info, rtx set, int set_code)
 	dmode = GET_MODE (dest);
 	smode = GET_MODE (src);
 
-	/* The mode of an ADDRESS_OPERAND is the mode of the memory
-	   reference, not the mode of the address.  */
-	if (GET_CODE (src) == MATCH_OPERAND
-	    && ! strcmp (XSTR (src, 1), "address_operand"))
+	/* Mode checking is not performed for special predicates.  */
+	if (special_predicate_operand_p (src)
+	    || special_predicate_operand_p (dest))
 	  ;
 
         /* The operands of a SET must have the same mode unless one
@@ -687,6 +718,7 @@ validate_pattern (rtx pattern, md_rtx_info *info, rtx set, int set_code)
       }
 
     case CLOBBER:
+    case CLOBBER_HIGH:
       validate_pattern (SET_DEST (pattern), info, pattern, '=');
       return;
 
@@ -701,9 +733,56 @@ validate_pattern (rtx pattern, md_rtx_info *info, rtx set, int set_code)
       return;
 
     case LABEL_REF:
-      if (GET_MODE (LABEL_REF_LABEL (pattern)) != VOIDmode)
+      if (GET_MODE (XEXP (pattern, 0)) != VOIDmode)
 	error_at (info->loc, "operand to label_ref %smode not VOIDmode",
-		  GET_MODE_NAME (GET_MODE (LABEL_REF_LABEL (pattern))));
+		  GET_MODE_NAME (GET_MODE (XEXP (pattern, 0))));
+      break;
+
+    case VEC_SELECT:
+      if (GET_MODE (pattern) != VOIDmode)
+	{
+	  machine_mode mode = GET_MODE (pattern);
+	  machine_mode imode = GET_MODE (XEXP (pattern, 0));
+	  machine_mode emode
+	    = VECTOR_MODE_P (mode) ? GET_MODE_INNER (mode) : mode;
+	  if (GET_CODE (XEXP (pattern, 1)) == PARALLEL)
+	    {
+	      int expected = 1;
+	      unsigned int nelems;
+	      if (VECTOR_MODE_P (mode)
+		  && !GET_MODE_NUNITS (mode).is_constant (&expected))
+		error_at (info->loc,
+			  "vec_select with variable-sized mode %s",
+			  GET_MODE_NAME (mode));
+	      else if (XVECLEN (XEXP (pattern, 1), 0) != expected)
+		error_at (info->loc,
+			  "vec_select parallel with %d elements, expected %d",
+			  XVECLEN (XEXP (pattern, 1), 0), expected);
+	      else if (VECTOR_MODE_P (imode)
+		       && GET_MODE_NUNITS (imode).is_constant (&nelems))
+		{
+		  int i;
+		  for (i = 0; i < expected; ++i)
+		    if (CONST_INT_P (XVECEXP (XEXP (pattern, 1), 0, i))
+			&& (UINTVAL (XVECEXP (XEXP (pattern, 1), 0, i))
+			    >= nelems))
+		      error_at (info->loc,
+				"out of bounds selector %u in vec_select, "
+				"expected at most %u",
+				(unsigned)
+				UINTVAL (XVECEXP (XEXP (pattern, 1), 0, i)),
+				nelems - 1);
+		}
+	    }
+	  if (imode != VOIDmode && !VECTOR_MODE_P (imode))
+	    error_at (info->loc, "%smode of first vec_select operand is not a "
+				 "vector mode", GET_MODE_NAME (imode));
+	  else if (imode != VOIDmode && GET_MODE_INNER (imode) != emode)
+	    error_at (info->loc, "element mode mismatch between vec_select "
+				 "%smode and its operand %smode",
+		      GET_MODE_NAME (emode),
+		      GET_MODE_NAME (GET_MODE_INNER (imode)));
+	}
       break;
 
     default:
@@ -725,7 +804,7 @@ validate_pattern (rtx pattern, md_rtx_info *info, rtx set, int set_code)
 	    validate_pattern (XVECEXP (pattern, i, j), info, NULL_RTX, 0);
 	  break;
 
-	case 'i': case 'r': case 'w': case '0': case 's':
+	case 'r': case 'p': case 'i': case 'w': case '0': case 's':
 	  break;
 
 	default:
@@ -1047,6 +1126,9 @@ struct rtx_test
     /* Check REGNO (X) == LABEL.  */
     REGNO_FIELD,
 
+    /* Check known_eq (SUBREG_BYTE (X), LABEL).  */
+    SUBREG_FIELD,
+
     /* Check XINT (X, u.opno) == LABEL.  */
     INT_FIELD,
 
@@ -1127,6 +1209,7 @@ struct rtx_test
   static rtx_test code (position *);
   static rtx_test mode (position *);
   static rtx_test regno_field (position *);
+  static rtx_test subreg_field (position *);
   static rtx_test int_field (position *, int);
   static rtx_test wide_int_field (position *, int);
   static rtx_test veclen (position *);
@@ -1168,6 +1251,13 @@ rtx_test
 rtx_test::regno_field (position *pos)
 {
   rtx_test res (pos, rtx_test::REGNO_FIELD);
+  return res;
+}
+
+rtx_test
+rtx_test::subreg_field (position *pos)
+{
+  rtx_test res (pos, rtx_test::SUBREG_FIELD);
   return res;
 }
 
@@ -1292,6 +1382,7 @@ operator == (const rtx_test &a, const rtx_test &b)
     case rtx_test::CODE:
     case rtx_test::MODE:
     case rtx_test::REGNO_FIELD:
+    case rtx_test::SUBREG_FIELD:
     case rtx_test::VECLEN:
     case rtx_test::HAVE_NUM_CLOBBERS:
       return true;
@@ -1350,14 +1441,16 @@ struct int_set : public auto_vec <uint64_t, 1>
   iterator end ();
 };
 
-int_set::int_set () {}
+int_set::int_set () : auto_vec<uint64_t, 1> () {}
 
-int_set::int_set (uint64_t label)
+int_set::int_set (uint64_t label) :
+  auto_vec<uint64_t, 1> ()
 {
   safe_push (label);
 }
 
-int_set::int_set (const int_set &other)
+int_set::int_set (const int_set &other) :
+  auto_vec<uint64_t, 1> ()
 {
   safe_splice (other);
 }
@@ -1747,6 +1840,7 @@ safe_to_hoist_p (decision *d, const rtx_test &test, known_conditions *kc)
       gcc_unreachable ();
 
     case rtx_test::REGNO_FIELD:
+    case rtx_test::SUBREG_FIELD:
     case rtx_test::INT_FIELD:
     case rtx_test::WIDE_INT_FIELD:
     case rtx_test::VECLEN:
@@ -1954,6 +2048,7 @@ transition_parameter_type (rtx_test::kind_enum kind)
       return parameter::MODE;
 
     case rtx_test::REGNO_FIELD:
+    case rtx_test::SUBREG_FIELD:
       return parameter::UINT;
 
     case rtx_test::INT_FIELD:
@@ -3788,17 +3883,6 @@ operator < (const pattern_pos &e1, const pattern_pos &e2)
   return diff < 0;
 }
 
-/* Return the name of the predicate matched by MATCH_RTX.  */
-
-static const char *
-predicate_name (rtx match_rtx)
-{
-  if (GET_CODE (match_rtx) == MATCH_SCRATCH)
-    return "scratch_operand";
-  else
-    return XSTR (match_rtx, 1);
-}
-
 /* Add new decisions to S that check whether the rtx at position POS
    matches PATTERN.  Return the state that is reached in that case.
    TOP_PATTERN is the overall pattern, as passed to match_pattern_1.  */
@@ -3974,6 +4058,14 @@ match_pattern_2 (state *s, md_rtx_info *info, position *pos, rtx pattern)
 		    /* Make sure that XWINT (X, I) has the right value.  */
 		    s = add_decision (s, rtx_test::wide_int_field (pos, i),
 				      XWINT (pattern, 0), false);
+		    break;
+
+		  case 'p':
+		    /* We don't have a way of parsing polynomial offsets yet,
+		       and hopefully never will.  */
+		    s = add_decision (s, rtx_test::subreg_field (pos),
+				      SUBREG_BYTE (pattern).to_constant (),
+				      false);
 		    break;
 
 		  case '0':
@@ -4155,12 +4247,15 @@ write_header (void)
 /* Generated automatically by the program `genrecog' from the target\n\
    machine description file.  */\n\
 \n\
+#define IN_TARGET_CODE 1\n\
+\n\
 #include \"config.h\"\n\
 #include \"system.h\"\n\
 #include \"coretypes.h\"\n\
 #include \"backend.h\"\n\
 #include \"predict.h\"\n\
 #include \"rtl.h\"\n\
+#include \"memmodel.h\"\n\
 #include \"tm_p.h\"\n\
 #include \"emit-rtl.h\"\n\
 #include \"insn-config.h\"\n\
@@ -4440,7 +4535,7 @@ print_parameter_value (const parameter &param)
 	break;
 
       case parameter::MODE:
-	printf ("%smode", GET_MODE_NAME ((machine_mode) param.value));
+	printf ("E_%smode", GET_MODE_NAME ((machine_mode) param.value));
 	break;
 
       case parameter::INT:
@@ -4501,6 +4596,12 @@ print_nonbool_test (output_state *os, const rtx_test &test)
 
     case rtx_test::REGNO_FIELD:
       printf ("REGNO (");
+      print_test_rtx (os, test);
+      printf (")");
+      break;
+
+    case rtx_test::SUBREG_FIELD:
+      printf ("SUBREG_BYTE (");
       print_test_rtx (os, test);
       printf (")");
       break;
@@ -4587,6 +4688,14 @@ print_test (output_state *os, const rtx_test &test, bool is_param,
       print_label_value (test, is_param, value);
       break;
 
+    case rtx_test::SUBREG_FIELD:
+      printf ("%s (", invert_p ? "maybe_ne" : "known_eq");
+      print_nonbool_test (os, test);
+      printf (", ");
+      print_label_value (test, is_param, value);
+      printf (")");
+      break;
+
     case rtx_test::SAVED_CONST_INT:
       gcc_assert (!is_param && value == 1);
       print_test_rtx (os, test);
@@ -4638,7 +4747,7 @@ print_test (output_state *os, const rtx_test &test, bool is_param,
       gcc_assert (!is_param && value == 1);
       if (invert_p)
 	printf ("!");
-      print_c_condition (test.u.string);
+      rtx_reader_ptr->print_c_condition (test.u.string);
       break;
 
     case rtx_test::ACCEPT:
@@ -5078,11 +5187,6 @@ print_pattern (output_state *os, pattern_routine *routine)
 static void
 print_subroutine (output_state *os, state *s, int proc_id)
 {
-  /* For now, the top-level "recog" takes a plain "rtx", and performs a
-     checked cast to "rtx_insn *" for use throughout the rest of the
-     function and the code it calls.  */
-  const char *insn_param
-    = proc_id > 0 ? "rtx_insn *insn" : "rtx uncast_insn";
   printf ("\n");
   switch (os->type)
     {
@@ -5095,8 +5199,8 @@ print_subroutine (output_state *os, state *s, int proc_id)
       else
 	printf ("int\nrecog");
       printf (" (rtx x1 ATTRIBUTE_UNUSED,\n"
-	      "\t%s ATTRIBUTE_UNUSED,\n"
-	      "\tint *pnum_clobbers ATTRIBUTE_UNUSED)\n", insn_param);
+	      "\trtx_insn *insn ATTRIBUTE_UNUSED,\n"
+	      "\tint *pnum_clobbers ATTRIBUTE_UNUSED)\n");
       break;
 
     case SPLIT:
@@ -5121,11 +5225,6 @@ print_subroutine (output_state *os, state *s, int proc_id)
   if (proc_id == 0)
     {
       printf ("  recog_data.insn = NULL;\n");
-      if (os->type == RECOG)
-	{
-	  printf ("  rtx_insn *insn ATTRIBUTE_UNUSED;\n");
-	  printf ("  insn = safe_as_a <rtx_insn *> (uncast_insn);\n");
-	}
     }
   print_state (os, s, 2, true);
   printf ("}\n");
@@ -5196,7 +5295,7 @@ remove_clobbers (acceptance_type *acceptance_ptr, rtx *pattern_ptr)
   for (i = XVECLEN (pattern, 0); i > 0; i--)
     {
       rtx x = XVECEXP (pattern, 0, i - 1);
-      if (GET_CODE (x) != CLOBBER
+      if ((GET_CODE (x) != CLOBBER && GET_CODE (x) != CLOBBER_HIGH)
 	  || (!REG_P (XEXP (x, 0))
 	      && GET_CODE (XEXP (x, 0)) != MATCH_SCRATCH))
 	break;
@@ -5223,7 +5322,7 @@ remove_clobbers (acceptance_type *acceptance_ptr, rtx *pattern_ptr)
 }
 
 int
-main (int argc, char **argv)
+main (int argc, const char **argv)
 {
   state insn_root, split_root, peephole2_root;
 

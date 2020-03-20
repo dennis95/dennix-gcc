@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -10,25 +10,6 @@ import (
 	"syscall"
 	"unsafe"
 )
-
-// supportsVistaIP reports whether the platform implements new IP
-// stack and ABIs supported on Windows Vista and above.
-var supportsVistaIP bool
-
-func init() {
-	supportsVistaIP = probeWindowsIPStack()
-}
-
-func probeWindowsIPStack() (supportsVistaIP bool) {
-	v, err := syscall.GetVersion()
-	if err != nil {
-		return true // Windows 10 and above will deprecate this API
-	}
-	if byte(v) < 6 { // major version of Windows Vista is 6
-		return false
-	}
-	return true
-}
 
 // adapterAddresses returns a list of IP adapter and address
 // structures. The structure contains an IP adapter and flattened
@@ -61,7 +42,7 @@ func adapterAddresses() ([]*windows.IpAdapterAddresses, error) {
 }
 
 // If the ifindex is zero, interfaceTable returns mappings of all
-// network interfaces.  Otherwise it returns a mapping of a specific
+// network interfaces. Otherwise it returns a mapping of a specific
 // interface.
 func interfaceTable(ifindex int) ([]Interface, error) {
 	aas, err := adapterAddresses()
@@ -84,9 +65,8 @@ func interfaceTable(ifindex int) ([]Interface, error) {
 			}
 			// For now we need to infer link-layer service
 			// capabilities from media types.
-			// We will be able to use
-			// MIB_IF_ROW2.AccessType once we drop support
-			// for Windows XP.
+			// TODO: use MIB_IF_ROW2.AccessType now that we no longer support
+			// Windows XP.
 			switch aa.IfType {
 			case windows.IF_TYPE_ETHERNET_CSMACD, windows.IF_TYPE_ISO88025_TOKENRING, windows.IF_TYPE_IEEE80211, windows.IF_TYPE_IEEE1394:
 				ifi.Flags |= FlagBroadcast | FlagMulticast
@@ -116,7 +96,7 @@ func interfaceTable(ifindex int) ([]Interface, error) {
 }
 
 // If the ifi is nil, interfaceAddrTable returns addresses for all
-// network interfaces.  Otherwise it returns addresses for a specific
+// network interfaces. Otherwise it returns addresses for a specific
 // interface.
 func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
 	aas, err := adapterAddresses()
@@ -129,35 +109,17 @@ func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
 		if index == 0 { // ipv6IfIndex is a substitute for ifIndex
 			index = aa.Ipv6IfIndex
 		}
-		var pfx4, pfx6 []IPNet
-		if !supportsVistaIP {
-			pfx4, pfx6, err = addrPrefixTable(aa)
-			if err != nil {
-				return nil, err
-			}
-		}
 		if ifi == nil || ifi.Index == int(index) {
 			for puni := aa.FirstUnicastAddress; puni != nil; puni = puni.Next {
 				sa, err := puni.Address.Sockaddr.Sockaddr()
 				if err != nil {
 					return nil, os.NewSyscallError("sockaddr", err)
 				}
-				var l int
 				switch sa := sa.(type) {
 				case *syscall.SockaddrInet4:
-					if supportsVistaIP {
-						l = int(puni.OnLinkPrefixLength)
-					} else {
-						l = addrPrefixLen(pfx4, IP(sa.Addr[:]))
-					}
-					ifat = append(ifat, &IPNet{IP: IPv4(sa.Addr[0], sa.Addr[1], sa.Addr[2], sa.Addr[3]), Mask: CIDRMask(l, 8*IPv4len)})
+					ifat = append(ifat, &IPNet{IP: IPv4(sa.Addr[0], sa.Addr[1], sa.Addr[2], sa.Addr[3]), Mask: CIDRMask(int(puni.OnLinkPrefixLength), 8*IPv4len)})
 				case *syscall.SockaddrInet6:
-					if supportsVistaIP {
-						l = int(puni.OnLinkPrefixLength)
-					} else {
-						l = addrPrefixLen(pfx6, IP(sa.Addr[:]))
-					}
-					ifa := &IPNet{IP: make(IP, IPv6len), Mask: CIDRMask(l, 8*IPv6len)}
+					ifa := &IPNet{IP: make(IP, IPv6len), Mask: CIDRMask(int(puni.OnLinkPrefixLength), 8*IPv6len)}
 					copy(ifa.IP, sa.Addr[:])
 					ifat = append(ifat, ifa)
 				}
@@ -179,59 +141,6 @@ func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
 		}
 	}
 	return ifat, nil
-}
-
-func addrPrefixTable(aa *windows.IpAdapterAddresses) (pfx4, pfx6 []IPNet, err error) {
-	for p := aa.FirstPrefix; p != nil; p = p.Next {
-		sa, err := p.Address.Sockaddr.Sockaddr()
-		if err != nil {
-			return nil, nil, os.NewSyscallError("sockaddr", err)
-		}
-		switch sa := sa.(type) {
-		case *syscall.SockaddrInet4:
-			pfx := IPNet{IP: IP(sa.Addr[:]), Mask: CIDRMask(int(p.PrefixLength), 8*IPv4len)}
-			pfx4 = append(pfx4, pfx)
-		case *syscall.SockaddrInet6:
-			pfx := IPNet{IP: IP(sa.Addr[:]), Mask: CIDRMask(int(p.PrefixLength), 8*IPv6len)}
-			pfx6 = append(pfx6, pfx)
-		}
-	}
-	return
-}
-
-// addrPrefixLen returns an appropriate prefix length in bits for ip
-// from pfxs. It returns 32 or 128 when no appropriate on-link address
-// prefix found.
-//
-// NOTE: This is pretty naive implementation that contains many
-// allocations and non-effective linear search, and should not be used
-// freely.
-func addrPrefixLen(pfxs []IPNet, ip IP) int {
-	var l int
-	var cand *IPNet
-	for i := range pfxs {
-		if !pfxs[i].Contains(ip) {
-			continue
-		}
-		if cand == nil {
-			l, _ = pfxs[i].Mask.Size()
-			cand = &pfxs[i]
-			continue
-		}
-		m, _ := pfxs[i].Mask.Size()
-		if m > l {
-			l = m
-			cand = &pfxs[i]
-			continue
-		}
-	}
-	if l > 0 {
-		return l
-	}
-	if ip.To4() != nil {
-		return 8 * IPv4len
-	}
-	return 8 * IPv6len
 }
 
 // interfaceMulticastAddrTable returns addresses for a specific

@@ -6,7 +6,7 @@
  *                                                                          *
  *                          C Implementation File                           *
  *                                                                          *
- *            Copyright (C) 2000-2015, Free Software Foundation, Inc.       *
+ *            Copyright (C) 2000-2019, Free Software Foundation, Inc.       *
  *                                                                          *
  * GNAT is free software;  you can  redistribute it  and/or modify it under *
  * terms of the  GNU General Public License as published  by the Free Soft- *
@@ -99,6 +99,8 @@ extern void (*Unlock_Task) (void);
 
 #include <windows.h>
 
+#define IS_BAD_PTR(ptr) (IsBadCodePtr((FARPROC)ptr))
+
 int
 __gnat_backtrace (void **array,
                   int size,
@@ -137,6 +139,10 @@ __gnat_backtrace (void **array,
 	}
       else
 	{
+	  /* If the last unwinding step failed somehow, stop here.  */
+	  if (IS_BAD_PTR(context.Rip))
+	    break;
+
 	  /* Unwind.  */
 	  memset (&NvContext, 0, sizeof (KNONVOLATILE_CONTEXT_POINTERS));
 	  RtlVirtualUnwind (0, ImageBase, context.Rip, RuntimeFunction,
@@ -294,7 +300,20 @@ __gnat_backtrace (void **array,
 #define PC_ADJUST -2
 /* The minimum size of call instructions on this architecture is 2 bytes */
 
-/*---------------------- PPC AIX/PPC Lynx 178/Older Darwin ------------------*/
+/*---------------------- ARM VxWorks ------------------------------------*/
+#elif (defined (ARMEL) && defined (__vxworks))
+
+#include "vxWorks.h"
+#include "version.h"
+
+#define USE_GCC_UNWINDER
+#define PC_ADJUST -2
+
+#if ((_WRS_VXWORKS_MAJOR >= 7) && (_VX_CPU != ARMARCH8A))
+#define USING_ARM_UNWINDING 1
+#endif
+
+/*---------------------- PPC AIX/PPC Lynx 178/Older Darwin --------------*/
 #elif ((defined (_POWER) && defined (_AIX)) || \
        (defined (__powerpc__) && defined (__Lynx__) && !defined(__ELF__)) || \
        (defined (__ppc__) && defined (__APPLE__)))
@@ -348,12 +367,17 @@ extern void __runnit(); /* thread entry point.  */
 
 #define BASE_SKIP 1
 
-/*-------------------- PPC ELF (GNU/Linux & VxWorks) ---------------------*/
+/*----------- PPC ELF (GNU/Linux & VxWorks & Lynx178e) -------------------*/
 
 #elif (defined (_ARCH_PPC) && defined (__vxworks)) ||  \
+  (defined (__powerpc__) && defined (__Lynx__) && defined(__ELF__)) || \
   (defined (__linux__) && defined (__powerpc__))
 
+#if defined (_ARCH_PPC64) && !defined (__USING_SJLJ_EXCEPTIONS__)
+#define USE_GCC_UNWINDER
+#else
 #define USE_GENERIC_UNWINDER
+#endif
 
 struct layout
 {
@@ -454,10 +478,11 @@ struct layout
 #define PC_ADJUST -2
 #define STOP_FRAME(CURRENT, TOP_STACK) \
   (IS_BAD_PTR((long)(CURRENT)) \
+   || (void *) (CURRENT) < (TOP_STACK) \
    || IS_BAD_PTR((long)(CURRENT)->return_address) \
    || (CURRENT)->return_address == 0 \
    || (void *) ((CURRENT)->next) < (TOP_STACK)  \
-   || (void *) (CURRENT) < (TOP_STACK))
+   || EXTRA_STOP_CONDITION(CURRENT))
 
 #define BASE_SKIP (1+FRAME_LEVEL)
 
@@ -479,6 +504,56 @@ struct layout
         || ((*((ptr) - 5) & 0xff) == 0x9a) \
         || ((*((ptr) - 1) & 0xff) == 0xff) \
         || (((*(ptr) & 0xd0ff) == 0xd0ff))))
+
+#if defined (__vxworks) && defined (__RTP__)
+
+/* For VxWorks following backchains past the "main" frame gets us into the
+   kernel space, where it can't be dereferenced. So lets stop at the main
+   symbol.  */
+extern void main();
+
+static int
+is_return_from(void *symbol_addr, void *ret_addr)
+{
+  int ret = 0;
+  char *ptr = (char *)ret_addr;
+
+  if ((*(ptr - 5) & 0xff) == 0xe8)
+    {
+      /* call addr16  E8 xx xx xx xx  */
+      int32_t offset = *(int32_t *)(ptr - 4);
+      ret = (ptr + offset) == symbol_addr;
+    }
+
+  /* Others not implemented yet...  But it is very likely that call addr16
+     is used here.  */
+  return ret;
+}
+
+#define EXTRA_STOP_CONDITION(CURRENT) \
+  (is_return_from(&main, (CURRENT)->return_address))
+#else /* not (defined (__vxworks) && defined (__RTP__)) */
+#define EXTRA_STOP_CONDITION(CURRENT) (0)
+#endif /* not (defined (__vxworks) && defined (__RTP__)) */
+
+/*----------------------------- qnx ----------------------------------*/
+
+#elif defined (__QNX__)
+
+#define USE_GCC_UNWINDER
+
+#if defined (__aarch64__)
+#define PC_ADJUST -4
+#else
+#error Unhandled QNX architecture.
+#endif
+
+/*------------------- aarch64-linux ----------------------------------*/
+
+#elif (defined (__aarch64__) && defined (__linux__))
+
+#define USE_GCC_UNWINDER
+#define PC_ADJUST -4
 
 /*----------------------------- ia64 ---------------------------------*/
 
@@ -511,6 +586,12 @@ struct layout
    The condition is expressed the way above because we cannot reliably rely on
    any other macro from the base compiler when compiling stage1.  */
 
+#ifdef USING_ARM_UNWINDING
+/* This value is not part of the enumerated reason codes defined in unwind.h
+   for ARM style unwinding, but is used in the included "C" code, so we
+   define it to a reasonable value to avoid a compilation error.  */
+#define _URC_NORMAL_STOP 0
+#endif
 #include "tb-gcc.c"
 
 /*------------------------------------------------------------------*

@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1996-2015, Free Software Foundation, Inc.         --
+--          Copyright (C) 1996-2019, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -37,7 +37,7 @@ with Snames;
 with Switch;   use Switch;
 with System;   use System;
 with Table;
-with Targparm; use Targparm;
+with Targparm;
 with Types;
 
 with Ada.Command_Line; use Ada.Command_Line;
@@ -153,6 +153,8 @@ procedure Gnatlink is
    Binder_Obj_File      : String_Access;
 
    Base_Command_Name    : String_Access;
+
+   Target_Debuggable_Suffix : String_Access;
 
    Tname    : Temp_File_Name;
    Tname_FD : File_Descriptor := Invalid_FD;
@@ -423,36 +425,6 @@ procedure Gnatlink is
 
                elsif Arg'Length = 2 then
                   case Arg (2) is
-                     when 'b' =>
-                        Linker_Options.Increment_Last;
-                        Linker_Options.Table (Linker_Options.Last) :=
-                          new String'(Arg);
-
-                        Binder_Options.Increment_Last;
-                        Binder_Options.Table (Binder_Options.Last) :=
-                          Linker_Options.Table (Linker_Options.Last);
-
-                        Next_Arg := Next_Arg + 1;
-
-                        if Next_Arg > Argument_Count then
-                           Exit_With_Error ("Missing argument for -b");
-                        end if;
-
-                        Get_Machine_Name : declare
-                           Name_Arg : constant String_Access :=
-                                        new String'(Argument (Next_Arg));
-
-                        begin
-                           Linker_Options.Increment_Last;
-                           Linker_Options.Table (Linker_Options.Last) :=
-                             Name_Arg;
-
-                           Binder_Options.Increment_Last;
-                           Binder_Options.Table (Binder_Options.Last) :=
-                             Name_Arg;
-
-                        end Get_Machine_Name;
-
                      when 'f' =>
                         if Object_List_File_Supported then
                            Object_List_File_Required := True;
@@ -527,15 +499,40 @@ procedure Gnatlink is
                      Exit_With_Error ("Missing argument for --LINK=");
                   end if;
 
-                  Linker_Path :=
-                    System.OS_Lib.Locate_Exec_On_Path (Arg (8 .. Arg'Last));
+                  declare
+                     L_Args : constant Argument_List_Access :=
+                               Argument_String_To_List (Arg (8 .. Arg'Last));
+                  begin
+                     --  The linker program is the first argument
 
-                  if Linker_Path = null then
-                     Exit_With_Error
-                       ("Could not locate linker: " & Arg (8 .. Arg'Last));
+                     Linker_Path :=
+                      System.OS_Lib.Locate_Exec_On_Path (L_Args.all (1).all);
+
+                     if Linker_Path = null then
+                        Exit_With_Error
+                          ("Could not locate linker: " & L_Args.all (1).all);
+                     end if;
+
+                     --  The other arguments are passed as-is to the linker and
+                     --  override those coming from --GCC= if any.
+
+                     if L_Args.all'Last >= 2 then
+                        Gcc_Linker_Options.Set_Last (0);
+                     end if;
+
+                     for J in 2 .. L_Args.all'Last loop
+                        Gcc_Linker_Options.Increment_Last;
+                        Gcc_Linker_Options.Table
+                          (Gcc_Linker_Options.Last) :=
+                                             new String'(L_Args.all (J).all);
+                     end loop;
+                  end;
+
+               elsif Arg'Length >= 6 and then Arg (1 .. 6) = "--GCC=" then
+                  if Arg'Length = 6 then
+                     Exit_With_Error ("Missing argument for --GCC=");
                   end if;
 
-               elsif Arg'Length > 6 and then Arg (1 .. 6) = "--GCC=" then
                   declare
                      Program_Args : constant Argument_List_Access :=
                                       Argument_String_To_List
@@ -1105,8 +1102,10 @@ procedure Gnatlink is
                   --  We will be looking for the static version of the library
                   --  as it is in the same directory as the shared version.
 
-                  if Next_Line (Nlast - Library_Version'Length + 1 .. Nlast) =
-                       Library_Version
+                  if Nlast >= Library_Version'Length
+                    and then
+                      Next_Line (Nlast - Library_Version'Length + 1 .. Nlast) =
+                        Library_Version
                   then
                      --  Set Last to point to last character before the
                      --  library version.
@@ -1403,7 +1402,6 @@ procedure Gnatlink is
       Write_Line ("  -v -v Very verbose mode");
       Write_Eol;
       Write_Line ("  -o nam     Use 'nam' as the name of the executable");
-      Write_Line ("  -b target  Compile the binder source to run on target");
       Write_Line ("  -Bdir      Load compiler executables from dir");
 
       if Is_Supported (Map_File) then
@@ -1411,8 +1409,8 @@ procedure Gnatlink is
          Write_Line ("  -M         Create map file mainprog.map");
       end if;
 
-      Write_Line ("  --GCC=comp Use comp as the compiler");
-      Write_Line ("  --LINK=nam Use 'nam' for the linking rather than 'gcc'");
+      Write_Line ("  --GCC=comp Use 'comp' as the compiler rather than 'gcc'");
+      Write_Line ("  --LINK=lnk Use 'lnk' as the linker rather than 'gcc'");
       Write_Eol;
       Write_Line ("  [non-Ada-objects]  list of non Ada object files");
       Write_Line ("  [linker-options]   other options for the linker");
@@ -1646,12 +1644,14 @@ begin
 
    Write_Header;
 
+   Target_Debuggable_Suffix := Get_Target_Debuggable_Suffix;
+
    --  If no output name specified, then use the base name of .ali file name
 
    if Output_File_Name = null then
       Output_File_Name :=
         new String'(Base_Name (Ali_File_Name.all)
-                      & Get_Target_Debuggable_Suffix.all);
+                      & Target_Debuggable_Suffix.all);
    end if;
 
    Linker_Options.Increment_Last;
@@ -1680,10 +1680,10 @@ begin
 
    --  Special warnings for worrisome file names on windows
 
-   --  Windows-7 will not allow an executable file whose name contains any
-   --  of the substrings "install", "setup", or "update" to load without
-   --  special administration privileges. This rather incredible behavior
-   --  is Microsoft's idea of a useful security precaution.
+   --  Recent versions of Windows by default cause privilege escalation if an
+   --  executable file name contains substrings "install", "setup", "update"
+   --  or "patch". A console application will typically fail to load as a
+   --  result, so we should warn the user.
 
    Bad_File_Names_On_Windows : declare
       FN : String := Output_File_Name.all;
@@ -1696,13 +1696,10 @@ begin
          for J in 1 .. FN'Length - (S'Length - 1) loop
             if FN (J .. J + (S'Length - 1)) = S then
                Error_Msg
-                 ("warning: possible problem with executable name """
-                  & Output_File_Name.all & '"');
+                 ("warning: executable file name """ & Output_File_Name.all
+                  & """ contains substring """ & S & '"');
                Error_Msg
-                 ("file name contains substring """ & S & '"');
-               Error_Msg
-                 ("admin privileges may be required on Windows 7 "
-                  & "to load this file");
+                 ("admin privileges may be required to run this file");
             end if;
          end loop;
       end Check_File_Name;
@@ -1714,15 +1711,13 @@ begin
             FN (J) := Csets.Fold_Lower (FN (J));
       end loop;
 
-      --  For now we detect windows by an output executable name ending with
-      --  the suffix .exe.
+      --  For now we detect Windows by its executable suffix of .exe
 
-      if FN'Length > 5
-        and then FN (FN'Last - 3 .. FN'Last) = ".exe"
-      then
+      if Target_Debuggable_Suffix.all = ".exe" then
          Check_File_Name ("install");
          Check_File_Name ("setup");
          Check_File_Name ("update");
+         Check_File_Name ("patch");
       end if;
    end Bad_File_Names_On_Windows;
 
@@ -1869,25 +1864,6 @@ begin
       Stack_Op : Boolean := False;
 
    begin
-      if AAMP_On_Target then
-
-         --  Remove extraneous flags not relevant for AAMP
-
-         for J in reverse Linker_Options.First .. Linker_Options.Last loop
-            if Linker_Options.Table (J)'Length = 0
-              or else Linker_Options.Table (J) (1 .. 3) = "-Wl"
-              or else Linker_Options.Table (J) (1 .. 3) = "-sh"
-              or else Linker_Options.Table (J) (1 .. 2) = "-O"
-              or else Linker_Options.Table (J) (1 .. 2) = "-g"
-            then
-               Linker_Options.Table (J .. Linker_Options.Last - 1) :=
-                 Linker_Options.Table (J + 1 .. Linker_Options.Last);
-               Linker_Options.Decrement_Last;
-               Num_Args := Num_Args - 1;
-            end if;
-         end loop;
-      end if;
-
       --  Remove duplicate stack size setting from the Linker_Options table.
       --  The stack setting option "-Xlinker --stack=R,C" can be found
       --  in one line when set by a pragma Linker_Options or in two lines
@@ -1908,6 +1884,7 @@ begin
       Clean_Link_Option_Set : declare
          J                  : Natural;
          Shared_Libgcc_Seen : Boolean := False;
+         Static_Libgcc_Seen : Boolean := False;
 
       begin
          J := Linker_Options.First;
@@ -1929,7 +1906,7 @@ begin
                end if;
             end if;
 
-            --  Remove duplicate -shared-libgcc switch
+            --  Remove duplicate -shared-libgcc switches
 
             if Linker_Options.Table (J).all = Shared_Libgcc_String then
                if Shared_Libgcc_Seen then
@@ -1940,6 +1917,20 @@ begin
 
                else
                   Shared_Libgcc_Seen := True;
+               end if;
+            end if;
+
+            --  Remove duplicate -static-libgcc switches
+
+            if Linker_Options.Table (J).all = Static_Libgcc_String then
+               if Static_Libgcc_Seen then
+                  Linker_Options.Table (J .. Linker_Options.Last - 1) :=
+                    Linker_Options.Table (J + 1 .. Linker_Options.Last);
+                  Linker_Options.Decrement_Last;
+                  Num_Args := Num_Args - 1;
+
+               else
+                  Static_Libgcc_Seen := True;
                end if;
             end if;
 
@@ -1974,12 +1965,25 @@ begin
             --  libgcc, if gcc is not called with -shared-libgcc, call it
             --  with -static-libgcc, as there are some platforms where one
             --  of these two switches is compulsory to link.
+            --  Don't push extra switches if we already saw one.
 
             if Shared_Libgcc_Default = 'T'
               and then not Shared_Libgcc_Seen
+              and then not Static_Libgcc_Seen
             then
                Linker_Options.Increment_Last;
                Linker_Options.Table (Linker_Options.Last) := Static_Libgcc;
+               Num_Args := Num_Args + 1;
+            end if;
+
+            --  Likewise, the reverse.
+
+            if Shared_Libgcc_Default = 'H'
+              and then not Static_Libgcc_Seen
+              and then not Shared_Libgcc_Seen
+            then
+               Linker_Options.Increment_Last;
+               Linker_Options.Table (Linker_Options.Last) := Shared_Libgcc;
                Num_Args := Num_Args + 1;
             end if;
          end if;

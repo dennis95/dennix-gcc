@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2015, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2019, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -27,7 +27,6 @@ with Atree;    use Atree;
 with Checks;   use Checks;
 with Einfo;    use Einfo;
 with Errout;   use Errout;
-with Ghost;    use Ghost;
 with Lib;      use Lib;
 with Lib.Xref; use Lib.Xref;
 with Namet;    use Namet;
@@ -66,13 +65,6 @@ package body Sem_Ch11 is
       Set_Etype                   (Id, Standard_Exception_Type);
       Set_Is_Statically_Allocated (Id);
       Set_Is_Pure                 (Id, PF);
-
-      --  An exception declared within a Ghost region is automatically Ghost
-      --  (SPARK RM 6.9(2)).
-
-      if Ghost_Mode > None then
-         Set_Is_Ghost_Entity (Id);
-      end if;
 
       if Has_Aspects (N) then
          Analyze_Aspect_Specifications (N, Id);
@@ -173,8 +165,24 @@ package body Sem_Ch11 is
 
    begin
       Handler := First (L);
-      Check_Restriction (No_Exceptions, Handler);
-      Check_Restriction (No_Exception_Handlers, Handler);
+
+      --  Pragma Restriction_Warnings has more related semantics than pragma
+      --  Restrictions in that it flags exception handlers as violators. Note
+      --  that the compiler must still generate handlers for certain critical
+      --  scenarios such as finalization. As a result, these handlers should
+      --  not be subjected to the restriction check when in warnings mode.
+
+      if not Comes_From_Source (Handler)
+        and then (Restriction_Warnings (No_Exception_Handlers)
+                   or else Restriction_Warnings (No_Exception_Propagation)
+                   or else Restriction_Warnings (No_Exceptions))
+      then
+         null;
+
+      else
+         Check_Restriction (No_Exceptions, Handler);
+         Check_Restriction (No_Exception_Handlers, Handler);
+      end if;
 
       --  Kill current remembered values, since we don't know where we were
       --  when the exception was raised.
@@ -214,6 +222,7 @@ package body Sem_Ch11 is
                   H_Scope :=
                     New_Internal_Entity
                      (E_Block, Current_Scope, Sloc (Choice), 'E');
+                  Set_Is_Exception_Handler (H_Scope);
                end if;
 
                Push_Scope (H_Scope);
@@ -318,11 +327,11 @@ package body Sem_Ch11 is
                                            N_Formal_Package_Declaration
                            then
                               Error_Msg_NE
-                                ("exception& is declared in "  &
-                                 "generic formal package", Id, Ent);
+                                ("exception& is declared in generic formal "
+                                 & "package", Id, Ent);
                               Error_Msg_N
-                                ("\and therefore cannot appear in " &
-                                 "handler (RM 11.2(8))", Id);
+                                ("\and therefore cannot appear in handler "
+                                 & "(RM 11.2(8))", Id);
                               exit;
 
                            --  If the exception is declared in an inner
@@ -362,8 +371,8 @@ package body Sem_Ch11 is
 
             Analyze_Statements (Statements (Handler));
 
-            --  If a choice was present, we created a special scope for it,
-            --  so this is where we pop that special scope to get rid of it.
+            --  If a choice was present, we created a special scope for it, so
+            --  this is where we pop that special scope to get rid of it.
 
             if Present (Choice) then
                End_Scope;
@@ -416,14 +425,15 @@ package body Sem_Ch11 is
 
       Analyze_Statements (Statements (N));
 
-      --  If the current scope is a subprogram, then this is the right place to
-      --  check for hanging useless assignments from the statement sequence of
-      --  the subprogram body. Skip this in the body of a postcondition,
-      --  since in that case there are no source references, and we need to
-      --  preserve deferred references from the enclosing scope.
+      --  If the current scope is a subprogram, entry or task body or declare
+      --  block then this is the right place to check for hanging useless
+      --  assignments from the statement sequence. Skip this in the body of a
+      --  postcondition, since in that case there are no source references, and
+      --  we need to preserve deferred references from the enclosing scope.
 
-      if Is_Subprogram (Current_Scope)
-         and then Chars (Current_Scope) /= Name_uPostconditions
+      if ((Is_Subprogram (Current_Scope) or else Is_Entry (Current_Scope))
+           and then Chars (Current_Scope) /= Name_uPostconditions)
+         or else Ekind_In (Current_Scope, E_Block, E_Task_Type)
       then
          Warn_On_Useless_Assignments (Current_Scope);
       end if;

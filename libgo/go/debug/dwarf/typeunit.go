@@ -1,4 +1,4 @@
-// Copyright 2012 The Go Authors.  All rights reserved.
+// Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -9,11 +9,11 @@ import (
 	"strconv"
 )
 
-// Parse the type units stored in a DWARF4 .debug_types section.  Each
+// Parse the type units stored in a DWARF4 .debug_types section. Each
 // type unit defines a single primary type and an 8-byte signature.
 // Other sections may then use formRefSig8 to refer to the type.
 
-// The typeUnit format is a single type with a signature.  It holds
+// The typeUnit format is a single type with a signature. It holds
 // the same data as a compilation unit.
 type typeUnit struct {
 	unit
@@ -38,16 +38,11 @@ func (d *Data) parseTypes(name string, types []byte) error {
 			b.error("unsupported DWARF version " + strconv.Itoa(vers))
 			return b.err
 		}
-		var ao uint32
+		var ao uint64
 		if !dwarf64 {
-			ao = b.uint32()
+			ao = uint64(b.uint32())
 		} else {
-			ao64 := b.uint64()
-			if ao64 != uint64(uint32(ao64)) {
-				b.error("type unit abbrev offset overflow")
-				return b.err
-			}
-			ao = uint32(ao64)
+			ao = b.uint64()
 		}
 		atable, err := d.parseAbbrev(ao, vers)
 		if err != nil {
@@ -76,7 +71,7 @@ func (d *Data) parseTypes(name string, types []byte) error {
 				data:   b.bytes(int(n - (b.off - hdroff))),
 				atable: atable,
 				asize:  int(asize),
-				vers:   int(vers),
+				vers:   vers,
 				is64:   dwarf64,
 			},
 			toff: Offset(toff),
@@ -101,7 +96,7 @@ func (d *Data) sigToType(sig uint64) (Type, error) {
 
 	b := makeBuf(d, tu, tu.name, tu.off, tu.data)
 	r := &typeUnitReader{d: d, tu: tu, b: b}
-	t, err := d.readType(tu.name, r, Offset(tu.toff), make(map[Offset]Type), nil)
+	t, err := d.readType(tu.name, r, tu.toff, make(map[Offset]Type), nil)
 	if err != nil {
 		return nil, err
 	}

@@ -2,7 +2,7 @@
    by the C-based front ends.  The structure of gimplified, or
    language-independent, trees is dictated by the grammar described in this
    file.
-   Copyright (C) 2002-2016 Free Software Foundation, Inc.
+   Copyright (C) 2002-2019 Free Software Foundation, Inc.
    Lowering of expressions contributed by Sebastian Pop <s.pop@laposte.net>
    Re-written to support lowering of whole function trees, documentation
    and miscellaneous cleanups by Diego Novillo <dnovillo@redhat.com>
@@ -36,7 +36,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "gimplify.h"
 #include "langhooks.h"
 #include "dumpfile.h"
-#include "cilk.h"
 #include "c-ubsan.h"
 
 /*  The gimplification pass converts the language-dependent trees
@@ -67,23 +66,23 @@ ubsan_walk_array_refs_r (tree *tp, int *walk_subtrees, void *data)
 {
   hash_set<tree> *pset = (hash_set<tree> *) data;
 
-  /* Since walk_tree doesn't call the callback function on the decls
-     in BIND_EXPR_VARS, we have to walk them manually.  */
   if (TREE_CODE (*tp) == BIND_EXPR)
     {
+      /* Since walk_tree doesn't call the callback function on the decls
+	 in BIND_EXPR_VARS, we have to walk them manually, so we can avoid
+	 instrumenting DECL_INITIAL of TREE_STATIC vars.  */
+      *walk_subtrees = 0;
       for (tree decl = BIND_EXPR_VARS (*tp); decl; decl = DECL_CHAIN (decl))
 	{
 	  if (TREE_STATIC (decl))
-	    {
-	      *walk_subtrees = 0;
-	      continue;
-	    }
+	    continue;
 	  walk_tree (&DECL_INITIAL (decl), ubsan_walk_array_refs_r, pset,
 		     pset);
 	  walk_tree (&DECL_SIZE (decl), ubsan_walk_array_refs_r, pset, pset);
 	  walk_tree (&DECL_SIZE_UNIT (decl), ubsan_walk_array_refs_r, pset,
 		     pset);
 	}
+      walk_tree (&BIND_EXPR_BODY (*tp), ubsan_walk_array_refs_r, pset, pset);
     }
   else if (TREE_CODE (*tp) == ADDR_EXPR
 	   && TREE_CODE (TREE_OPERAND (*tp, 0)) == ARRAY_REF)
@@ -115,7 +114,7 @@ void
 c_genericize (tree fndecl)
 {
   FILE *dump_orig;
-  int local_dump_flags;
+  dump_flags_t local_dump_flags;
   struct cgraph_node *cgn;
 
   if (flag_sanitize & SANITIZE_BOUNDS)
@@ -124,6 +123,10 @@ c_genericize (tree fndecl)
       walk_tree (&DECL_SAVED_TREE (fndecl), ubsan_walk_array_refs_r, &pset,
 		 &pset);
     }
+
+  if (warn_duplicated_branches)
+    walk_tree_without_duplicates (&DECL_SAVED_TREE (fndecl),
+				  do_warn_duplicated_branches_r, NULL);
 
   /* Dump the C-specific tree IR.  */
   dump_orig = get_dump_info (TDI_original, &local_dump_flags);
@@ -225,6 +228,8 @@ c_gimplify_expr (tree *expr_p, gimple_seq *pre_p ATTRIBUTE_UNUSED,
     {
     case LSHIFT_EXPR:
     case RSHIFT_EXPR:
+    case LROTATE_EXPR:
+    case RROTATE_EXPR:
       {
 	/* We used to convert the right operand of a shift-expression
 	   to an integer_type_node in the FEs.  But it is unnecessary
@@ -240,7 +245,9 @@ c_gimplify_expr (tree *expr_p, gimple_seq *pre_p ATTRIBUTE_UNUSED,
 				    unsigned_type_node)
 	    && !types_compatible_p (TYPE_MAIN_VARIANT (TREE_TYPE (*op1_p)),
 				    integer_type_node))
-	  *op1_p = convert (unsigned_type_node, *op1_p);
+	  /* Make sure to unshare the result, tree sharing is invalid
+	     during gimplification.  */
+	  *op1_p = unshare_expr (convert (unsigned_type_node, *op1_p));
 	break;
       }
 
@@ -270,31 +277,6 @@ c_gimplify_expr (tree *expr_p, gimple_seq *pre_p ATTRIBUTE_UNUSED,
 	  }
 	break;
       }
-
-    case CILK_SPAWN_STMT:
-      gcc_assert(fn_contains_cilk_spawn_p (cfun)
-		 && cilk_detect_spawn_and_unwrap (expr_p));
-
-      if (!seen_error ())
-	{
-	  cilk_gimplify_call_params_in_spawned_fn (expr_p, pre_p);
-	  return (enum gimplify_status) gimplify_cilk_spawn (expr_p);
-	}
-      return GS_ERROR;
-
-    case MODIFY_EXPR:
-    case INIT_EXPR:
-    case CALL_EXPR:
-      if (fn_contains_cilk_spawn_p (cfun)
-	  && cilk_detect_spawn_and_unwrap (expr_p)
-	  /* If an error is found, the spawn wrapper is removed and the
-	     original expression (MODIFY/INIT/CALL_EXPR) is processes as
-	     it is supposed to be.  */
-	  && !seen_error ())
-	{
-	  cilk_gimplify_call_params_in_spawned_fn (expr_p, pre_p);
-	  return (enum gimplify_status) gimplify_cilk_spawn (expr_p);
-	}
 
     default:;
     }

@@ -1,5 +1,5 @@
 ;;  Mips.md	     Machine Description for MIPS based processors
-;;  Copyright (C) 1989-2016 Free Software Foundation, Inc.
+;;  Copyright (C) 1989-2019 Free Software Foundation, Inc.
 ;;  Contributed by   A. Lichnewsky, lich@inria.inria.fr
 ;;  Changes by       Michael Meissner, meissner@osf.org
 ;;  64-bit r4000 support by Ian Lance Taylor, ian@cygnus.com, and
@@ -37,7 +37,9 @@
   74kf3_2
   loongson_2e
   loongson_2f
-  loongson_3a
+  gs464
+  gs464e
+  gs264e
   m4k
   octeon
   octeon2
@@ -69,6 +71,7 @@
   p5600
   m5100
   i6400
+  p6600
 ])
 
 (define_c_enum "unspec" [
@@ -120,6 +123,8 @@
 
   ;; MIPS16 constant pools.
   UNSPEC_ALIGN
+  UNSPEC_CONSTTABLE
+  UNSPEC_CONSTTABLE_END
   UNSPEC_CONSTTABLE_INT
   UNSPEC_CONSTTABLE_FLOAT
 
@@ -151,13 +156,15 @@
 
   ;; Stack checking.
   UNSPEC_PROBE_STACK_RANGE
+
+  ;; The `.insn' pseudo-op.
+  UNSPEC_INSN_PSEUDO
 ])
 
 (define_constants
   [(TLS_GET_TP_REGNUM		3)
    (GET_FCSR_REGNUM		2)
    (SET_FCSR_REGNUM		4)
-   (MIPS16_T_REGNUM		24)
    (PIC_FUNCTION_ADDR_REGNUM	25)
    (RETURN_ADDR_REGNUM		31)
    (CPRESTORE_SLOT_REGNUM	76)
@@ -225,11 +232,12 @@
    shift_shift"
   (const_string "unknown"))
 
-(define_attr "alu_type" "unknown,add,sub,not,nor,and,or,xor"
+(define_attr "alu_type" "unknown,add,sub,not,nor,and,or,xor,simd_add"
   (const_string "unknown"))
 
 ;; Main data type used by the insn
-(define_attr "mode" "unknown,none,QI,HI,SI,DI,TI,SF,DF,TF,FPSW"
+(define_attr "mode" "unknown,none,QI,HI,SI,DI,TI,SF,DF,TF,FPSW,
+  V2DI,V4SI,V8HI,V16QI,V2DF,V4SF"
   (const_string "unknown"))
 
 ;; True if the main data type is twice the size of a word.
@@ -240,6 +248,13 @@
 
 	 (and (eq_attr "mode" "TI,TF")
 	      (match_test "TARGET_64BIT"))
+	 (const_string "yes")]
+	(const_string "no")))
+
+;; True if the main data type is four times of the size of a word.
+(define_attr "qword_mode" "no,yes"
+  (cond [(and (eq_attr "mode" "TI,TF")
+	      (not (match_test "TARGET_64BIT")))
 	 (const_string "yes")]
 	(const_string "no")))
 
@@ -365,7 +380,12 @@
    shift,slt,signext,clz,pop,trap,imul,imul3,imul3nc,imadd,idiv,idiv3,move,
    fmove,fadd,fmul,fmadd,fdiv,frdiv,frdiv1,frdiv2,fabs,fneg,fcmp,fcvt,fsqrt,
    frsqrt,frsqrt1,frsqrt2,dspmac,dspmacsat,accext,accmod,dspalu,dspalusat,
-   multi,atomic,syncloop,nop,ghost,multimem"
+   multi,atomic,syncloop,nop,ghost,multimem,
+   simd_div,simd_fclass,simd_flog2,simd_fadd,simd_fcvt,simd_fmul,simd_fmadd,
+   simd_fdiv,simd_bitins,simd_bitmov,simd_insert,simd_sld,simd_mul,simd_fcmp,
+   simd_fexp2,simd_int_arith,simd_bit,simd_shift,simd_splat,simd_fill,
+   simd_permute,simd_shf,simd_sat,simd_pcnt,simd_copy,simd_branch,simd_cmsa,
+   simd_fminmax,simd_logic,simd_move,simd_load,simd_store"
   (cond [(eq_attr "jal" "!unset") (const_string "call")
 	 (eq_attr "got" "load") (const_string "load")
 
@@ -398,6 +418,11 @@
 
 	 ;; These types of move are always split.
 	 (eq_attr "move_type" "constN,shift_shift")
+	   (const_string "multi")
+
+	 ;; These types of move are split for quadword modes only.
+	 (and (eq_attr "move_type" "move,const")
+	      (eq_attr "qword_mode" "yes"))
 	   (const_string "multi")
 
 	 ;; These types of move are split for doubleword modes only.
@@ -486,6 +511,12 @@
 	      (eq_attr "dword_mode" "yes"))
 	 (const_int 2)
 
+	 ;; Check for quadword moves that are decomposed into four
+	 ;; instructions.
+	 (and (eq_attr "move_type" "mtc,mfc,move")
+	      (eq_attr "qword_mode" "yes"))
+	 (const_int 4)
+
 	 ;; Constants, loads and stores are handled by external routines.
 	 (and (eq_attr "move_type" "const,constN")
 	      (eq_attr "dword_mode" "yes"))
@@ -527,7 +558,7 @@
 	 (const_int 2)
 
 	 (eq_attr "type" "idiv,idiv3")
-	 (symbol_ref "mips_idiv_insns ()")
+	 (symbol_ref "mips_idiv_insns (GET_MODE (PATTERN (insn)))")
 
 	 (not (eq_attr "sync_mem" "none"))
 	 (symbol_ref "mips_sync_loop_insns (insn, operands)")]
@@ -805,9 +836,9 @@
 (define_mode_iterator MOVE64
   [DI DF
    (V2SF "TARGET_HARD_FLOAT && TARGET_PAIRED_SINGLE_FLOAT")
-   (V2SI "TARGET_HARD_FLOAT && TARGET_LOONGSON_VECTORS")
-   (V4HI "TARGET_HARD_FLOAT && TARGET_LOONGSON_VECTORS")
-   (V8QI "TARGET_HARD_FLOAT && TARGET_LOONGSON_VECTORS")])
+   (V2SI "TARGET_HARD_FLOAT && TARGET_LOONGSON_MMI")
+   (V4HI "TARGET_HARD_FLOAT && TARGET_LOONGSON_MMI")
+   (V8QI "TARGET_HARD_FLOAT && TARGET_LOONGSON_MMI")])
 
 ;; 128-bit modes for which we provide move patterns on 64-bit targets.
 (define_mode_iterator MOVE128 [TI TF])
@@ -834,9 +865,9 @@
   [(DF "!TARGET_64BIT && TARGET_DOUBLE_FLOAT")
    (DI "!TARGET_64BIT && TARGET_DOUBLE_FLOAT")
    (V2SF "!TARGET_64BIT && TARGET_PAIRED_SINGLE_FLOAT")
-   (V2SI "!TARGET_64BIT && TARGET_LOONGSON_VECTORS")
-   (V4HI "!TARGET_64BIT && TARGET_LOONGSON_VECTORS")
-   (V8QI "!TARGET_64BIT && TARGET_LOONGSON_VECTORS")
+   (V2SI "!TARGET_64BIT && TARGET_LOONGSON_MMI")
+   (V4HI "!TARGET_64BIT && TARGET_LOONGSON_MMI")
+   (V8QI "!TARGET_64BIT && TARGET_LOONGSON_MMI")
    (TF "TARGET_64BIT && TARGET_FLOAT64")])
 
 ;; In GPR templates, a string like "<d>subu" will expand to "subu" in the
@@ -884,8 +915,15 @@
 (define_mode_attr fmt [(SF "s") (DF "d") (V2SF "ps")])
 
 ;; This attribute gives the upper-case mode name for one unit of a
-;; floating-point mode.
-(define_mode_attr UNITMODE [(SF "SF") (DF "DF") (V2SF "SF")])
+;; floating-point mode or vector mode.
+(define_mode_attr UNITMODE [(SF "SF") (DF "DF") (V2SF "SF") (V4SF "SF")
+			    (V16QI "QI") (V8HI "HI") (V4SI "SI") (V2DI "DI")
+			    (V2DF "DF")])
+
+;; As above, but in lower case.
+(define_mode_attr unitmode [(SF "sf") (DF "df") (V2SF "sf") (V4SF "sf")
+			    (V16QI "qi") (V8QI "qi") (V8HI "hi") (V4HI "hi")
+			    (V4SI "si") (V2SI "si") (V2DI "di") (V2DF "df")])
 
 ;; This attribute gives the integer mode that has the same size as a
 ;; fixed-point mode.
@@ -940,6 +978,10 @@
 ;; This code iterator allows unsigned and signed modulus to be generated
 ;; from the same template.
 (define_code_iterator any_mod [mod umod])
+
+;; This code iterator allows addition and subtraction to be generated
+;; from the same template.
+(define_code_iterator addsub [plus minus])
 
 ;; This code iterator allows all native floating-point comparisons to be
 ;; generated from the same template.
@@ -1113,6 +1155,7 @@
 (include "i6400.md")
 (include "p5600.md")
 (include "m5100.md")
+(include "p6600.md")
 (include "4k.md")
 (include "5k.md")
 (include "20kc.md")
@@ -1132,7 +1175,9 @@
 (include "9000.md")
 (include "10000.md")
 (include "loongson2ef.md")
-(include "loongson3a.md")
+(include "gs464.md")
+(include "gs464e.md")
+(include "gs264e.md")
 (include "octeon.md")
 (include "sb1.md")
 (include "sr71k.md")
@@ -1558,7 +1603,7 @@
 {
   rtx lo;
 
-  if (TARGET_LOONGSON_2EF || TARGET_LOONGSON_3A || ISA_HAS_R6<D>MUL)
+  if (TARGET_LOONGSON_2EF || TARGET_LOONGSON_EXT || ISA_HAS_R6<D>MUL)
     emit_insn (gen_mul<mode>3_mul3_nohilo (operands[0], operands[1],
 					   operands[2]));
   else if (ISA_HAS_<D>MUL3)
@@ -1581,11 +1626,11 @@
   [(set (match_operand:GPR 0 "register_operand" "=d")
         (mult:GPR (match_operand:GPR 1 "register_operand" "d")
                   (match_operand:GPR 2 "register_operand" "d")))]
-  "TARGET_LOONGSON_2EF || TARGET_LOONGSON_3A || ISA_HAS_R6<D>MUL"
+  "TARGET_LOONGSON_2EF || TARGET_LOONGSON_EXT || ISA_HAS_R6<D>MUL"
 {
   if (TARGET_LOONGSON_2EF)
     return "<d>multu.g\t%0,%1,%2";
-  else if (TARGET_LOONGSON_3A)
+  else if (TARGET_LOONGSON_EXT)
     return "gs<d>multu\t%0,%1,%2";
   else
     return "<d>mul\t%0,%1,%2";
@@ -2975,11 +3020,11 @@
   [(set (match_operand:GPR 0 "register_operand" "=&d")
 	(any_div:GPR (match_operand:GPR 1 "register_operand" "d")
 		     (match_operand:GPR 2 "register_operand" "d")))]
-  "TARGET_LOONGSON_2EF || TARGET_LOONGSON_3A || ISA_HAS_R6<D>DIV"
+  "TARGET_LOONGSON_2EF || TARGET_LOONGSON_EXT || ISA_HAS_R6<D>DIV"
   {
     if (TARGET_LOONGSON_2EF)
       return mips_output_division ("<d>div<u>.g\t%0,%1,%2", operands);
-    else if (TARGET_LOONGSON_3A)
+    else if (TARGET_LOONGSON_EXT)
       return mips_output_division ("gs<d>div<u>\t%0,%1,%2", operands);
     else
       return mips_output_division ("<d>div<u>\t%0,%1,%2", operands);
@@ -2991,11 +3036,11 @@
   [(set (match_operand:GPR 0 "register_operand" "=&d")
 	(any_mod:GPR (match_operand:GPR 1 "register_operand" "d")
 		     (match_operand:GPR 2 "register_operand" "d")))]
-  "TARGET_LOONGSON_2EF || TARGET_LOONGSON_3A || ISA_HAS_R6<D>DIV"
+  "TARGET_LOONGSON_2EF || TARGET_LOONGSON_EXT || ISA_HAS_R6<D>DIV"
   {
     if (TARGET_LOONGSON_2EF)
       return mips_output_division ("<d>mod<u>.g\t%0,%1,%2", operands);
-    else if (TARGET_LOONGSON_3A)
+    else if (TARGET_LOONGSON_EXT)
       return mips_output_division ("gs<d>mod<u>\t%0,%1,%2", operands);
     else
       return mips_output_division ("<d>mod<u>\t%0,%1,%2", operands);
@@ -3108,6 +3153,23 @@
 ;;
 ;;  ...................
 ;;
+;;  Count trailing zeroes.
+;;
+;;  ...................
+;;
+
+(define_insn "ctz<mode>2"
+  [(set (match_operand:GPR 0 "register_operand" "=d")
+	(ctz:GPR (match_operand:GPR 1 "register_operand" "d")))]
+  "ISA_HAS_CTZ_CTO"
+  "<d>ctz\t%0,%1"
+  [(set_attr "type" "clz")
+   (set_attr "mode" "<MODE>")])
+
+
+;;
+;;  ...................
+;;
 ;;  Count number of set bits.
 ;;
 ;;  ...................
@@ -3203,9 +3265,9 @@
 		 (match_operand:GPR 2 "and_reg_operand")))])
 
 ;; The middle-end is not allowed to convert ANDing with 0xffff_ffff into a
-;; zero_extendsidi2 because of TRULY_NOOP_TRUNCATION, so handle these here.
-;; Note that this variant does not trigger for SI mode because we require
-;; a 64-bit HOST_WIDE_INT and 0xffff_ffff wouldn't be a canonical
+;; zero_extendsidi2 because of TARGET_TRULY_NOOP_TRUNCATION, so handle these
+;; here.  Note that this variant does not trigger for SI mode because we
+;; require a 64-bit HOST_WIDE_INT and 0xffff_ffff wouldn't be a canonical
 ;; sign-extended SImode value.
 ;;
 ;; These are possible combinations for operand 1 and 2.  The table
@@ -3387,7 +3449,7 @@
 ;; modes is a no-op, as it is for most other GCC ports.  Truncating
 ;; DImode values to SImode is not a no-op for TARGET_64BIT since we
 ;; need to make sure that the lower 32 bits are properly sign-extended
-;; (see TRULY_NOOP_TRUNCATION).  Truncating DImode values into modes
+;; (see TARGET_TRULY_NOOP_TRUNCATION).  Truncating DImode values into modes
 ;; smaller than SImode is equivalent to two separate truncations:
 ;;
 ;;                        A       B
@@ -3440,6 +3502,47 @@
   "exts\t%0,%1,%2,31"
   [(set_attr "type" "arith")
    (set_attr "mode" "<MODE>")])
+
+;; This could likely be generalized for any SUBDI mode, and any right
+;; shift, but AFAICT this is used so rarely it is not worth the additional
+;; complexity.
+(define_insn ""
+  [(set (match_operand:SI 0 "register_operand" "=d")
+        (ashiftrt:SI
+	  (truncate:SI
+	    (ashift:DI (match_operand:DI 1 "register_operand" "d")
+		       (match_operand:DI 2 "const_arith_operand" "")))
+	  (match_operand:DI 3 "const_arith_operand" "")))]
+  "(ISA_HAS_EXTS && TARGET_64BIT
+    && UINTVAL (operands[2]) < 32 && UINTVAL (operands[3]) < 32
+    && UINTVAL (operands[3]) >= UINTVAL (operands[2]))"
+  {
+    rtx xoperands[4];
+    xoperands[0] = operands[0];
+    xoperands[1] = operands[1];
+
+    /* The length of the field is the size of the outer mode less the outer
+       shift constant.  We fix the outer mode as SImode for simplicity.  */
+    unsigned int right_shift = INTVAL (operands[3]);
+    xoperands[3] = GEN_INT (32 - right_shift);
+
+    /* The field starts at the outer shift constant less the inner shift
+       constant.  */
+    unsigned int left_shift = INTVAL (operands[2]);
+    xoperands[2] = GEN_INT (right_shift - left_shift);
+
+    /* Sanity checks.  These constraints are taken from the MIPS ISA
+       manual.  */
+    gcc_assert (INTVAL (xoperands[2]) >= 0 && INTVAL (xoperands[2]) < 32);
+    gcc_assert (INTVAL (xoperands[3]) > 0 && INTVAL (xoperands[3]) <= 32);
+    gcc_assert (INTVAL (xoperands[2]) + INTVAL (xoperands[3]) > 0
+		&& INTVAL (xoperands[2]) + INTVAL (xoperands[3]) <= 32);
+
+    output_asm_insn ("exts\t%0,%1,%2,%m3", xoperands);
+    return "";
+  }
+  [(set_attr "type" "arith")
+   (set_attr "mode" "SI")])
 
 ;;
 ;;  ....................
@@ -3605,7 +3708,7 @@
 ;; Those for integer source operand are ordered widest source type first.
 
 ;; When TARGET_64BIT, all SImode integer and accumulator registers
-;; should already be in sign-extended form (see TRULY_NOOP_TRUNCATION
+;; should already be in sign-extended form (see TARGET_TRULY_NOOP_TRUNCATION
 ;; and truncdisi2).  We can therefore get rid of register->register
 ;; instructions if we constrain the source to be in the same register as
 ;; the destination.
@@ -5733,8 +5836,8 @@
   "ISA_HAS_ROR"
 {
   if (CONST_INT_P (operands[2]))
-    gcc_assert (INTVAL (operands[2]) >= 0
-		&& INTVAL (operands[2]) < GET_MODE_BITSIZE (<MODE>mode));
+    operands[2] = GEN_INT (INTVAL (operands[2])
+                           & (GET_MODE_BITSIZE (<MODE>mode) - 1));
 
   return "<d>ror\t%0,%1,%2";
 }
@@ -6354,62 +6457,57 @@
   if (!arith_operand (operands[0], SImode))
     operands[0] = force_reg (SImode, operands[0]);
 
-  operands[2] = GEN_INT (INTVAL (operands[2]) + 1);
-
+  emit_cmp_and_jump_insns (operands[0], operands[2], GTU,
+			   NULL_RTX, SImode, 1, operands[4]);
   emit_jump_insn (PMODE_INSN (gen_casesi_internal_mips16,
-			      (operands[0], operands[2],
-			       operands[3], operands[4])));
-
+			      (operands[0], operands[3])));
   DONE;
 })
 
 (define_insn "casesi_internal_mips16_<mode>"
   [(set (pc)
-     (if_then_else
-       (leu (match_operand:SI 0 "register_operand" "d")
-	    (match_operand:SI 1 "arith_operand" "dI"))
-       (unspec:P
-        [(match_dup 0)
-	 (label_ref (match_operand 2 "" ""))]
-	UNSPEC_CASESI_DISPATCH)
-       (label_ref (match_operand 3 "" ""))))
-   (clobber (match_scratch:P 4 "=d"))
-   (clobber (match_scratch:P 5 "=d"))
-   (clobber (reg:SI MIPS16_T_REGNUM))]
+	(unspec:P [(match_operand:SI 0 "register_operand" "d")
+		   (label_ref (match_operand 1 "" ""))]
+	 UNSPEC_CASESI_DISPATCH))
+   (clobber (match_scratch:P 2 "=d"))
+   (clobber (match_scratch:P 3 "=d"))]
   "TARGET_MIPS16_SHORT_JUMP_TABLES"
 {
-  rtx diff_vec = PATTERN (NEXT_INSN (as_a <rtx_insn *> (operands[2])));
+  rtx diff_vec = PATTERN (NEXT_INSN (as_a <rtx_insn *> (operands[1])));
 
   gcc_assert (GET_CODE (diff_vec) == ADDR_DIFF_VEC);
-  
-  output_asm_insn ("sltu\t%0, %1", operands);
-  output_asm_insn ("bteqz\t%3", operands);
-  
+
   switch (GET_MODE (diff_vec))
     {
-    case HImode:
-      output_asm_insn ("sll\t%5, %0, 1", operands);
-      output_asm_insn ("la\t%4, %2", operands);
-      output_asm_insn ("<d>addu\t%5, %4, %5", operands);
-      output_asm_insn ("lh\t%5, 0(%5)", operands);
+    case E_HImode:
+      output_asm_insn ("sll\t%3,%0,1", operands);
+      output_asm_insn ("<d>la\t%2,%1", operands);
+      output_asm_insn ("<d>addu\t%3,%2,%3", operands);
+      output_asm_insn ("lh\t%3,0(%3)", operands);
       break;
-    
-    case SImode:
-      output_asm_insn ("sll\t%5, %0, 2", operands);
-      output_asm_insn ("la\t%4, %2", operands);
-      output_asm_insn ("<d>addu\t%5, %4, %5", operands);
-      output_asm_insn ("lw\t%5, 0(%5)", operands);
+
+    case E_SImode:
+      output_asm_insn ("sll\t%3,%0,2", operands);
+      output_asm_insn ("<d>la\t%2,%1", operands);
+      output_asm_insn ("<d>addu\t%3,%2,%3", operands);
+      output_asm_insn ("lw\t%3,0(%3)", operands);
       break;
 
     default:
       gcc_unreachable ();
     }
-  
-  output_asm_insn ("addu\t%4, %4, %5", operands);
-  
-  return "j\t%4";
+
+  output_asm_insn ("<d>addu\t%2,%2,%3", operands);
+
+  if (GENERATE_MIPS16E)
+    return "jrc\t%2";
+  else
+    return "jr\t%2";
 }
-  [(set_attr "insn_count" "16")])
+  [(set (attr "insn_count")
+	(if_then_else (match_test "GENERATE_MIPS16E")
+		      (const_string "6")
+		      (const_string "7")))])
 
 ;; For TARGET_USE_GOT, we save the gp in the jmp_buf as well.
 ;; While it is possible to either pull it off the stack (in the
@@ -6544,7 +6642,6 @@
    (use (match_operand 0 "pmode_register_operand" ""))]
   ""
   {
-    operands[0] = gen_rtx_REG (Pmode, RETURN_ADDR_REGNUM);
     return mips_output_jump (operands, 0, -1, false);
   }
   [(set_attr "type"	"jump")
@@ -7101,13 +7198,20 @@
 	     (match_operand 2 "const_int_operand" "n"))]
   "ISA_HAS_PREFETCH && TARGET_EXPLICIT_RELOCS"
 {
-  if (TARGET_LOONGSON_2EF || TARGET_LOONGSON_3A)
+  if (TARGET_LOONGSON_2EF || TARGET_LOONGSON_EXT)
     {
-      /* Loongson 2[ef] and Loongson 3a use load to $0 for prefetching.  */
+      /* Loongson 2[ef] and Loongson ext use load to $0 for prefetching.  */
       if (TARGET_64BIT)
-        return "ld\t$0,%a0";
+	return "ld\t$0,%a0";
       else
-        return "lw\t$0,%a0";
+	return "lw\t$0,%a0";
+    }
+  /* Loongson ext2 implementation pref instructions.  */
+  if (TARGET_LOONGSON_EXT2)
+    {
+      operands[1] = mips_loongson_ext2_prefetch_cookie (operands[1],
+							operands[2]);
+      return "pref\t%1, %a0";
     }
   operands[1] = mips_prefetch_cookie (operands[1], operands[2]);
   return "pref\t%1,%a0";
@@ -7121,6 +7225,21 @@
 	     (match_operand 3 "const_int_operand" "n"))]
   "ISA_HAS_PREFETCHX && TARGET_HARD_FLOAT && TARGET_DOUBLE_FLOAT"
 {
+  if (TARGET_LOONGSON_EXT)
+    {
+      /* Loongson Loongson ext use index load to $0 for prefetching.  */
+      if (TARGET_64BIT)
+	return "gsldx\t$0,0(%0,%1)";
+      else
+	return "gslwx\t$0,0(%0,%1)";
+    }
+  /* Loongson ext2 implementation pref instructions.  */
+  if (TARGET_LOONGSON_EXT2)
+    {
+      operands[2] = mips_loongson_ext2_prefetch_cookie (operands[2],
+							operands[3]);
+      return "prefx\t%2,%1(%0)";
+    }
   operands[2] = mips_prefetch_cookie (operands[2], operands[3]);
   return "prefx\t%2,%1(%0)";
 }
@@ -7144,6 +7263,14 @@
       return "#nop";
   }
   [(set_attr "type"	"nop")])
+
+;; The `.insn' pseudo-op.
+(define_insn "insn_pseudo"
+  [(unspec_volatile [(const_int 0)] UNSPEC_INSN_PSEUDO)]
+  ""
+  ".insn"
+  [(set_attr "mode" "none")
+   (set_attr "insn_count" "0")])
 
 ;; MIPS4 Conditional move instructions.
 
@@ -7278,6 +7405,22 @@
 ;;  ....................
 ;;
 
+(define_insn "consttable"
+  [(unspec_volatile [(match_operand 0 "const_int_operand" "")]
+		    UNSPEC_CONSTTABLE)]
+  ""
+  ""
+  [(set_attr "mode" "none")
+   (set_attr "insn_count" "0")])
+
+(define_insn "consttable_end"
+  [(unspec_volatile [(match_operand 0 "const_int_operand" "")]
+		    UNSPEC_CONSTTABLE_END)]
+  ""
+  ""
+  [(set_attr "mode" "none")
+   (set_attr "insn_count" "0")])
+
 (define_insn "consttable_tls_reloc"
   [(unspec_volatile [(match_operand 0 "tls_reloc_operand" "")
 		     (match_operand 1 "const_int_operand" "")]
@@ -7306,7 +7449,7 @@
 {
   gcc_assert (GET_CODE (operands[0]) == CONST_DOUBLE);
   assemble_real (*CONST_DOUBLE_REAL_VALUE (operands[0]),
-		 GET_MODE (operands[0]),
+		 as_a <scalar_float_mode> (GET_MODE (operands[0])),
 		 GET_MODE_BITSIZE (GET_MODE (operands[0])));
   return "";
 }
@@ -7445,7 +7588,7 @@
 ;; __builtin_mips_get_fcsr: move the FCSR into operand 0.
 (define_expand "mips_get_fcsr"
   [(set (match_operand:SI 0 "register_operand")
-  	(unspec_volatile [(const_int 0)] UNSPEC_GET_FCSR))]
+       (unspec_volatile:SI [(const_int 0)] UNSPEC_GET_FCSR))]
   "TARGET_HARD_FLOAT_ABI"
 {
   if (TARGET_MIPS16)
@@ -7457,7 +7600,7 @@
 
 (define_insn "*mips_get_fcsr"
   [(set (match_operand:SI 0 "register_operand" "=d")
-  	(unspec_volatile [(const_int 0)] UNSPEC_GET_FCSR))]
+       (unspec_volatile:SI [(const_int 0)] UNSPEC_GET_FCSR))]
   "TARGET_HARD_FLOAT"
   "cfc1\t%0,$31")
 
@@ -7631,8 +7774,11 @@
 ; microMIPS patterns.
 (include "micromips.md")
 
-; ST-Microelectronics Loongson-2E/2F-specific patterns.
-(include "loongson.md")
+; Loongson MultiMedia extensions Instructions (MMI) patterns.
+(include "loongson-mmi.md")
+
+; The MIPS MSA Instructions.
+(include "mips-msa.md")
 
 (define_c_enum "unspec" [
   UNSPEC_ADDRESS_FIRST

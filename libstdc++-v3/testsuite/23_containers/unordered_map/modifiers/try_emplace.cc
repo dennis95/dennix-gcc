@@ -1,6 +1,6 @@
 // { dg-options "-std=gnu++17" }
 
-// Copyright (C) 2015-2016 Free Software Foundation, Inc.
+// Copyright (C) 2015-2019 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -22,9 +22,6 @@
 #include <functional>
 #include <testsuite_hooks.h>
 
-
-bool test __attribute__((unused)) = true;
-
 struct Val
 {
   bool moved_from_ctor = false;
@@ -42,6 +39,7 @@ struct Val
   {
     val = other.val;
     other.moved_from_assign = true;
+    return *this;
   }
 };
 

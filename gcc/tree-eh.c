@@ -1,5 +1,5 @@
 /* Exception handling semantics and decomposition for trees.
-   Copyright (C) 2003-2016 Free Software Foundation, Inc.
+   Copyright (C) 2003-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -43,6 +43,10 @@ along with GCC; see the file COPYING3.  If not see
 #include "langhooks.h"
 #include "cfgloop.h"
 #include "gimple-low.h"
+#include "stringpool.h"
+#include "attribs.h"
+#include "asan.h"
+#include "gimplify.h"
 
 /* In some instances a tree and a gimple need to be stored in a same table,
    i.e. in hash tables. This is a structure to do this. */
@@ -1413,11 +1417,12 @@ lower_try_finally_switch (struct leh_state *state, struct leh_tf_state *tf)
       x = gimple_build_assign (finally_tmp,
 			       build_int_cst (integer_type_node,
 					      fallthru_index));
+      gimple_set_location (x, finally_loc);
       gimple_seq_add_stmt (&tf->top_p_seq, x);
 
       tmp = build_int_cst (integer_type_node, fallthru_index);
       last_case = build_case_label (tmp, NULL,
-				    create_artificial_label (tf_loc));
+				    create_artificial_label (finally_loc));
       case_label_vec.quick_push (last_case);
       last_case_index++;
 
@@ -1426,7 +1431,7 @@ lower_try_finally_switch (struct leh_state *state, struct leh_tf_state *tf)
 
       tmp = lower_try_finally_fallthru_label (tf);
       x = gimple_build_goto (tmp);
-      gimple_set_location (x, tf_loc);
+      gimple_set_location (x, finally_loc);
       gimple_seq_add_stmt (&switch_body, x);
     }
 
@@ -1562,12 +1567,6 @@ lower_try_finally_switch (struct leh_state *state, struct leh_tf_state *tf)
 
 /* Decide whether or not we are going to duplicate the finally block.
    There are several considerations.
-
-   First, if this is Java, then the finally block contains code
-   written by the user.  It has line numbers associated with it,
-   so duplicating the block means it's difficult to set a breakpoint.
-   Since controlling code generation via -g is verboten, we simply
-   never duplicate code without optimization.
 
    Second, we'd like to prevent egregious code growth.  One way to
    do this is to estimate the size of the finally block, multiply
@@ -1985,7 +1984,7 @@ lower_eh_constructs_2 (struct leh_state *state, gimple_stmt_iterator *gsi)
 	tree fndecl = gimple_call_fndecl (stmt);
 	tree rhs, lhs;
 
-	if (fndecl && DECL_BUILT_IN_CLASS (fndecl) == BUILT_IN_NORMAL)
+	if (fndecl && fndecl_built_in_p (fndecl, BUILT_IN_NORMAL))
 	  switch (DECL_FUNCTION_CODE (fndecl))
 	    {
 	    case BUILT_IN_EH_POINTER:
@@ -2029,12 +2028,12 @@ lower_eh_constructs_2 (struct leh_state *state, gimple_stmt_iterator *gsi)
       /* FALLTHRU */
 
     case GIMPLE_ASSIGN:
-      /* If the stmt can throw use a new temporary for the assignment
+      /* If the stmt can throw, use a new temporary for the assignment
          to a LHS.  This makes sure the old value of the LHS is
 	 available on the EH edge.  Only do so for statements that
 	 potentially fall through (no noreturn calls e.g.), otherwise
 	 this new assignment might create fake fallthru regions.  */
-      if (stmt_could_throw_p (stmt)
+      if (stmt_could_throw_p (cfun, stmt)
 	  && gimple_has_lhs (stmt)
 	  && gimple_stmt_may_fallthru (stmt)
 	  && !tree_could_throw_p (gimple_get_lhs (stmt))
@@ -2052,7 +2051,7 @@ lower_eh_constructs_2 (struct leh_state *state, gimple_stmt_iterator *gsi)
 	  gsi_insert_after (gsi, s, GSI_SAME_STMT);
 	}
       /* Look for things that can throw exceptions, and record them.  */
-      if (state->cur_region && stmt_could_throw_p (stmt))
+      if (state->cur_region && stmt_could_throw_p (cfun, stmt))
 	{
 	  record_stmt_eh_region (state->cur_region, stmt);
 	  note_eh_region_may_contain_throw (state->cur_region);
@@ -2232,7 +2231,7 @@ make_eh_dispatch_edges (geh_dispatch *stmt)
     case ERT_TRY:
       for (c = r->u.eh_try.first_catch; c ; c = c->next_catch)
 	{
-	  dst = label_to_block (c->label);
+	  dst = label_to_block (cfun, c->label);
 	  make_edge (src, dst, 0);
 
 	  /* A catch-all handler doesn't have a fallthru.  */
@@ -2242,7 +2241,7 @@ make_eh_dispatch_edges (geh_dispatch *stmt)
       break;
 
     case ERT_ALLOWED_EXCEPTIONS:
-      dst = label_to_block (r->u.allowed.label);
+      dst = label_to_block (cfun, r->u.allowed.label);
       make_edge (src, dst, 0);
       break;
 
@@ -2271,7 +2270,7 @@ make_eh_edges (gimple *stmt)
   gcc_assert (lp != NULL);
 
   src = gimple_bb (stmt);
-  dst = label_to_block (lp->post_landing_pad);
+  dst = label_to_block (cfun, lp->post_landing_pad);
   make_edge (src, dst, EDGE_EH);
 }
 
@@ -2390,7 +2389,7 @@ redirect_eh_dispatch_edge (geh_dispatch *stmt, edge e, basic_block new_bb)
     case ERT_TRY:
       for (c = r->u.eh_try.first_catch; c ; c = c->next_catch)
 	{
-	  old_bb = label_to_block (c->label);
+	  old_bb = label_to_block (cfun, c->label);
 	  if (old_bb == e->dest)
 	    {
 	      c->label = new_lab;
@@ -2400,7 +2399,7 @@ redirect_eh_dispatch_edge (geh_dispatch *stmt, edge e, basic_block new_bb)
       break;
 
     case ERT_ALLOWED_EXCEPTIONS:
-      old_bb = label_to_block (r->u.allowed.label);
+      old_bb = label_to_block (cfun, r->u.allowed.label);
       gcc_assert (old_bb == e->dest);
       r->u.allowed.label = new_lab;
       any_changed = true;
@@ -2437,7 +2436,7 @@ operation_could_trap_helper_p (enum tree_code op,
     case ROUND_MOD_EXPR:
     case TRUNC_MOD_EXPR:
     case RDIV_EXPR:
-      if (honor_snans || honor_trapv)
+      if (honor_snans)
 	return true;
       if (fp_operation)
 	return flag_trapping_math;
@@ -2470,6 +2469,10 @@ operation_could_trap_helper_p (enum tree_code op,
       /* These operations don't trap with floating point.  */
       if (honor_trapv)
 	return true;
+      return false;
+
+    case ABSU_EXPR:
+      /* ABSU_EXPR never traps.  */
       return false;
 
     case PLUS_EXPR:
@@ -2659,14 +2662,15 @@ tree_could_trap_p (tree expr)
       if (TREE_CODE (TREE_OPERAND (expr, 0)) == ADDR_EXPR)
 	{
 	  tree base = TREE_OPERAND (TREE_OPERAND (expr, 0), 0);
-	  offset_int off = mem_ref_offset (expr);
-	  if (wi::neg_p (off, SIGNED))
+	  poly_offset_int off = mem_ref_offset (expr);
+	  if (maybe_lt (off, 0))
 	    return true;
 	  if (TREE_CODE (base) == STRING_CST)
-	    return wi::leu_p (TREE_STRING_LENGTH (base), off);
-	  else if (DECL_SIZE_UNIT (base) == NULL_TREE
-		   || TREE_CODE (DECL_SIZE_UNIT (base)) != INTEGER_CST
-		   || wi::leu_p (wi::to_offset (DECL_SIZE_UNIT (base)), off))
+	    return maybe_le (TREE_STRING_LENGTH (base), off);
+	  tree size = DECL_SIZE_UNIT (base);
+	  if (size == NULL_TREE
+	      || !poly_int_tree_p (size)
+	      || maybe_le (wi::to_poly_offset (size), off))
 	    return true;
 	  /* Now we are sure the first byte of the access is inside
 	     the object.  */
@@ -2720,14 +2724,82 @@ tree_could_trap_p (tree expr)
     }
 }
 
+/* Return non-NULL if there is an integer operation with trapping overflow
+   we can rewrite into non-trapping.  Called via walk_tree from
+   rewrite_to_non_trapping_overflow.  */
+
+static tree
+find_trapping_overflow (tree *tp, int *walk_subtrees, void *data)
+{
+  if (EXPR_P (*tp)
+      && ANY_INTEGRAL_TYPE_P (TREE_TYPE (*tp))
+      && !operation_no_trapping_overflow (TREE_TYPE (*tp), TREE_CODE (*tp)))
+    return *tp;
+  if (IS_TYPE_OR_DECL_P (*tp)
+      || (TREE_CODE (*tp) == SAVE_EXPR && data == NULL))
+    *walk_subtrees = 0;
+  return NULL_TREE;
+}
+
+/* Rewrite selected operations into unsigned arithmetics, so that they
+   don't trap on overflow.  */
+
+static tree
+replace_trapping_overflow (tree *tp, int *walk_subtrees, void *data)
+{
+  if (find_trapping_overflow (tp, walk_subtrees, data))
+    {
+      tree type = TREE_TYPE (*tp);
+      tree utype = unsigned_type_for (type);
+      *walk_subtrees = 0;
+      int len = TREE_OPERAND_LENGTH (*tp);
+      for (int i = 0; i < len; ++i)
+	walk_tree (&TREE_OPERAND (*tp, i), replace_trapping_overflow,
+		   data, (hash_set<tree> *) data);
+
+      if (TREE_CODE (*tp) == ABS_EXPR)
+	{
+	  TREE_SET_CODE (*tp, ABSU_EXPR);
+	  TREE_TYPE (*tp) = utype;
+	  *tp = fold_convert (type, *tp);
+	}
+      else
+	{
+	  TREE_TYPE (*tp) = utype;
+	  len = TREE_OPERAND_LENGTH (*tp);
+	  for (int i = 0; i < len; ++i)
+	    TREE_OPERAND (*tp, i)
+	      = fold_convert (utype, TREE_OPERAND (*tp, i));
+	  *tp = fold_convert (type, *tp);
+	}
+    }
+  return NULL_TREE;
+}
+
+/* If any subexpression of EXPR can trap due to -ftrapv, rewrite it
+   using unsigned arithmetics to avoid traps in it.  */
+
+tree
+rewrite_to_non_trapping_overflow (tree expr)
+{
+  if (!flag_trapv)
+    return expr;
+  hash_set<tree> pset;
+  if (!walk_tree (&expr, find_trapping_overflow, &pset, &pset))
+    return expr;
+  expr = unshare_expr (expr);
+  pset.empty ();
+  walk_tree (&expr, replace_trapping_overflow, &pset, &pset);
+  return expr;
+}
 
 /* Helper for stmt_could_throw_p.  Return true if STMT (assumed to be a
    an assignment or a conditional) may throw.  */
 
 static bool
-stmt_could_throw_1_p (gimple *stmt)
+stmt_could_throw_1_p (gassign *stmt)
 {
-  enum tree_code code = gimple_expr_code (stmt);
+  enum tree_code code = gimple_assign_rhs_code (stmt);
   bool honor_nans = false;
   bool honor_snans = false;
   bool fp_operation = false;
@@ -2740,11 +2812,8 @@ stmt_could_throw_1_p (gimple *stmt)
       || TREE_CODE_CLASS (code) == tcc_unary
       || TREE_CODE_CLASS (code) == tcc_binary)
     {
-      if (is_gimple_assign (stmt)
-	  && TREE_CODE_CLASS (code) == tcc_comparison)
+      if (TREE_CODE_CLASS (code) == tcc_comparison)
 	t = TREE_TYPE (gimple_assign_rhs1 (stmt));
-      else if (gimple_code (stmt) == GIMPLE_COND)
-	t = TREE_TYPE (gimple_cond_lhs (stmt));
       else
 	t = gimple_expr_type (stmt);
       fp_operation = FLOAT_TYPE_P (t);
@@ -2757,17 +2826,21 @@ stmt_could_throw_1_p (gimple *stmt)
 	honor_trapv = true;
     }
 
+  /* First check the LHS.  */
+  if (tree_could_trap_p (gimple_assign_lhs (stmt)))
+    return true;
+
   /* Check if the main expression may trap.  */
-  t = is_gimple_assign (stmt) ? gimple_assign_rhs2 (stmt) : NULL;
   ret = operation_could_trap_helper_p (code, fp_operation, honor_trapv,
-				       honor_nans, honor_snans, t,
+				       honor_nans, honor_snans,
+				       gimple_assign_rhs2 (stmt),
 				       &handled);
   if (handled)
     return ret;
 
   /* If the expression does not trap, see if any of the individual operands may
      trap.  */
-  for (i = 0; i < gimple_num_ops (stmt); i++)
+  for (i = 1; i < gimple_num_ops (stmt); i++)
     if (tree_could_trap_p (gimple_op (stmt, i)))
       return true;
 
@@ -2775,10 +2848,10 @@ stmt_could_throw_1_p (gimple *stmt)
 }
 
 
-/* Return true if statement STMT could throw an exception.  */
+/* Return true if statement STMT within FUN could throw an exception.  */
 
 bool
-stmt_could_throw_p (gimple *stmt)
+stmt_could_throw_p (function *fun, gimple *stmt)
 {
   if (!flag_exceptions)
     return false;
@@ -2793,14 +2866,25 @@ stmt_could_throw_p (gimple *stmt)
     case GIMPLE_CALL:
       return !gimple_call_nothrow_p (as_a <gcall *> (stmt));
 
-    case GIMPLE_ASSIGN:
     case GIMPLE_COND:
-      if (!cfun->can_throw_non_call_exceptions)
+      {
+	if (fun && !fun->can_throw_non_call_exceptions)
+	  return false;
+	gcond *cond = as_a <gcond *> (stmt);
+	tree lhs = gimple_cond_lhs (cond);
+	return operation_could_trap_p (gimple_cond_code (cond),
+				       FLOAT_TYPE_P (TREE_TYPE (lhs)),
+				       false, NULL_TREE);
+      }
+
+    case GIMPLE_ASSIGN:
+      if ((fun && !fun->can_throw_non_call_exceptions)
+	  || gimple_clobber_p (stmt))
         return false;
-      return stmt_could_throw_1_p (stmt);
+      return stmt_could_throw_1_p (as_a <gassign *> (stmt));
 
     case GIMPLE_ASM:
-      if (!cfun->can_throw_non_call_exceptions)
+      if (fun && !fun->can_throw_non_call_exceptions)
         return false;
       return gimple_asm_volatile_p (as_a <gasm *> (stmt));
 
@@ -2834,33 +2918,37 @@ tree_could_throw_p (tree t)
   return false;
 }
 
-/* Return true if STMT can throw an exception that is not caught within
-   the current function (CFUN).  */
+/* Return true if STMT can throw an exception that is not caught within its
+   function FUN.  FUN can be NULL but the function is extra conservative
+   then.  */
 
 bool
-stmt_can_throw_external (gimple *stmt)
+stmt_can_throw_external (function *fun, gimple *stmt)
 {
   int lp_nr;
 
-  if (!stmt_could_throw_p (stmt))
+  if (!stmt_could_throw_p (fun, stmt))
     return false;
+  if (!fun)
+    return true;
 
-  lp_nr = lookup_stmt_eh_lp (stmt);
+  lp_nr = lookup_stmt_eh_lp_fn (fun, stmt);
   return lp_nr == 0;
 }
 
-/* Return true if STMT can throw an exception that is caught within
-   the current function (CFUN).  */
+/* Return true if STMT can throw an exception that is caught within its
+   function FUN.  */
 
 bool
-stmt_can_throw_internal (gimple *stmt)
+stmt_can_throw_internal (function *fun, gimple *stmt)
 {
   int lp_nr;
 
-  if (!stmt_could_throw_p (stmt))
+  gcc_checking_assert (fun);
+  if (!stmt_could_throw_p (fun, stmt))
     return false;
 
-  lp_nr = lookup_stmt_eh_lp (stmt);
+  lp_nr = lookup_stmt_eh_lp_fn (fun, stmt);
   return lp_nr > 0;
 }
 
@@ -2871,7 +2959,7 @@ stmt_can_throw_internal (gimple *stmt)
 bool
 maybe_clean_eh_stmt_fn (struct function *ifun, gimple *stmt)
 {
-  if (stmt_could_throw_p (stmt))
+  if (stmt_could_throw_p (ifun, stmt))
     return false;
   return remove_stmt_from_eh_lp_fn (ifun, stmt);
 }
@@ -2896,7 +2984,7 @@ maybe_clean_or_replace_eh_stmt (gimple *old_stmt, gimple *new_stmt)
 
   if (lp_nr != 0)
     {
-      bool new_stmt_could_throw = stmt_could_throw_p (new_stmt);
+      bool new_stmt_could_throw = stmt_could_throw_p (cfun, new_stmt);
 
       if (new_stmt == old_stmt && new_stmt_could_throw)
 	return false;
@@ -2926,7 +3014,7 @@ maybe_duplicate_eh_stmt_fn (struct function *new_fun, gimple *new_stmt,
 {
   int old_lp_nr, new_lp_nr;
 
-  if (!stmt_could_throw_p (new_stmt))
+  if (!stmt_could_throw_p (new_fun, new_stmt))
     return false;
 
   old_lp_nr = lookup_stmt_eh_lp_fn (old_fun, old_stmt);
@@ -2965,7 +3053,7 @@ maybe_duplicate_eh_stmt (gimple *new_stmt, gimple *old_stmt)
 {
   int lp_nr;
 
-  if (!stmt_could_throw_p (new_stmt))
+  if (!stmt_could_throw_p (cfun, new_stmt))
     return false;
 
   lp_nr = lookup_stmt_eh_lp (old_stmt);
@@ -3212,6 +3300,7 @@ lower_resx (basic_block bb, gresx *stmt,
 	      gimple_stmt_iterator gsi2;
 
 	      new_bb = create_empty_bb (bb);
+	      new_bb->count = bb->count;
 	      add_bb_to_loop (new_bb, bb->loop_father);
 	      lab = gimple_block_label (new_bb);
 	      gsi2 = gsi_start_bb (new_bb);
@@ -3226,13 +3315,11 @@ lower_resx (basic_block bb, gresx *stmt,
 	  else
 	    {
 	      lab = *slot;
-	      new_bb = label_to_block (lab);
+	      new_bb = label_to_block (cfun, lab);
 	    }
 
 	  gcc_assert (EDGE_COUNT (bb->succs) == 0);
-	  e = make_edge (bb, new_bb, EDGE_FALLTHRU);
-	  e->count = bb->count;
-	  e->probability = REG_BR_PROB_BASE;
+	  e = make_single_succ_edge (bb, new_bb, EDGE_FALLTHRU);
 	}
       else
 	{
@@ -3248,6 +3335,7 @@ lower_resx (basic_block bb, gresx *stmt,
 	  e = single_succ_edge (bb);
 	  gcc_assert (e->flags & EDGE_EH);
 	  e->flags = (e->flags & ~EDGE_EH) | EDGE_FALLTHRU;
+	  e->probability = profile_probability::always ();
 
 	  /* If there are no more EH users of the landing pad, delete it.  */
 	  FOR_EACH_EDGE (e, ei, e->dest->preds)
@@ -3271,7 +3359,7 @@ lower_resx (basic_block bb, gresx *stmt,
 	 _Unwind_Resume library function.  */
 
       /* The ARM EABI redefines _Unwind_Resume as __cxa_end_cleanup
-	 with no arguments for C++ and Java.  Check for that.  */
+	 with no arguments for C++.  Check for that.  */
       if (src_r->use_cxa_end_cleanup)
 	{
 	  fn = builtin_decl_implicit (BUILT_IN_CXA_END_CLEANUP);
@@ -3287,6 +3375,18 @@ lower_resx (basic_block bb, gresx *stmt,
 	  var = make_ssa_name (var, x);
 	  gimple_call_set_lhs (x, var);
 	  gsi_insert_before (&gsi, x, GSI_SAME_STMT);
+
+	  /* When exception handling is delegated to a caller function, we
+	     have to guarantee that shadow memory variables living on stack
+	     will be cleaner before control is given to a parent function.  */
+	  if (sanitize_flags_p (SANITIZE_ADDRESS))
+	    {
+	      tree decl
+		= builtin_decl_implicit (BUILT_IN_ASAN_HANDLE_NO_RETURN);
+	      gimple *g = gimple_build_call (decl, 0);
+	      gimple_set_location (g, gimple_location (stmt));
+	      gsi_insert_before (&gsi, g, GSI_SAME_STMT);
+	    }
 
 	  fn = builtin_decl_implicit (BUILT_IN_UNWIND_RESUME);
 	  x = gimple_build_call (fn, 1, var);
@@ -3619,7 +3719,7 @@ lower_eh_dispatch (basic_block src, geh_dispatch *stmt)
 	    while (tp_node);
 	    if (! have_label)
 	      {
-	        remove_edge (find_edge (src, label_to_block (lab)));
+		remove_edge (find_edge (src, label_to_block (cfun, lab)));
 	        redirected = true;
 	      }
 	  }
@@ -3748,7 +3848,7 @@ pass_lower_eh_dispatch::execute (function *fun)
 	}
       else if (gimple_code (last) == GIMPLE_RESX)
 	{
-	  if (stmt_can_throw_external (last))
+	  if (stmt_can_throw_external (cfun, last))
 	    optimize_clobbers (bb);
 	  else
 	    flags |= sink_clobbers (bb);
@@ -3756,7 +3856,10 @@ pass_lower_eh_dispatch::execute (function *fun)
     }
 
   if (redirected)
-    delete_unreachable_blocks ();
+    {
+      free_dominance_info (CDI_DOMINATORS);
+      delete_unreachable_blocks ();
+    }
   return flags;
 }
 
@@ -3929,7 +4032,7 @@ maybe_remove_unreachable_handlers (void)
   FOR_EACH_VEC_SAFE_ELT (cfun->eh->lp_array, i, lp)
     if (lp && lp->post_landing_pad)
       {
-	if (label_to_block (lp->post_landing_pad) == NULL)
+	if (label_to_block (cfun, lp->post_landing_pad) == NULL)
 	  {
 	    remove_unreachable_handlers ();
 	    return;
@@ -3993,7 +4096,7 @@ remove_unreachable_handlers_no_lp (void)
 static bool
 unsplit_eh (eh_landing_pad lp)
 {
-  basic_block bb = label_to_block (lp->post_landing_pad);
+  basic_block bb = label_to_block (cfun, lp->post_landing_pad);
   gimple_stmt_iterator gsi;
   edge e_in, e_out;
 
@@ -4075,7 +4178,6 @@ unsplit_eh (eh_landing_pad lp)
   redirect_edge_pred (e_out, e_in->src);
   e_out->flags = e_in->flags;
   e_out->probability = e_in->probability;
-  e_out->count = e_in->count;
   remove_edge (e_in);
 
   return true;
@@ -4267,7 +4369,7 @@ cleanup_empty_eh_move_lp (basic_block bb, edge e_out,
 
   /* Clean up E_OUT for the fallthru.  */
   e_out->flags = (e_out->flags & ~EDGE_EH) | EDGE_FALLTHRU;
-  e_out->probability = REG_BR_PROB_BASE;
+  e_out->probability = profile_probability::always ();
 }
 
 /* A subroutine of cleanup_empty_eh.  Handle more complex cases of
@@ -4359,7 +4461,7 @@ infinite_empty_loop_p (edge e_first)
 static bool
 cleanup_empty_eh (eh_landing_pad lp)
 {
-  basic_block bb = label_to_block (lp->post_landing_pad);
+  basic_block bb = label_to_block (cfun, lp->post_landing_pad);
   gimple_stmt_iterator gsi;
   gimple *resx;
   eh_region new_region;
@@ -4382,10 +4484,11 @@ cleanup_empty_eh (eh_landing_pad lp)
       return false;
     }
 
-  resx = last_stmt (bb);
+  gsi = gsi_last_nondebug_bb (bb);
+  resx = gsi_stmt (gsi);
   if (resx && is_gimple_resx (resx))
     {
-      if (stmt_can_throw_external (resx))
+      if (stmt_can_throw_external (cfun, resx))
 	optimize_clobbers (bb);
       else if (sink_clobbers (bb))
 	ret = true;
@@ -4416,12 +4519,12 @@ cleanup_empty_eh (eh_landing_pad lp)
   resx = gsi_stmt (gsi);
   if (!e_out && gimple_call_builtin_p (resx, BUILT_IN_STACK_RESTORE))
     {
-      gsi_next (&gsi);
+      gsi_next_nondebug (&gsi);
       resx = gsi_stmt (gsi);
     }
   if (!is_gimple_resx (resx))
     return ret;
-  gcc_assert (gsi_one_before_end_p (gsi));
+  gcc_assert (gsi_one_nondebug_before_end_p (gsi));
 
   /* Determine if there are non-EH edges, or resx edges into the handler.  */
   has_non_eh_pred = false;
@@ -4660,13 +4763,13 @@ verify_eh_edges (gimple *stmt)
     {
       if (eh_edge)
 	{
-	  error ("BB %i can not throw but has an EH edge", bb->index);
+	  error ("BB %i cannot throw but has an EH edge", bb->index);
 	  return true;
 	}
       return false;
     }
 
-  if (!stmt_could_throw_p (stmt))
+  if (!stmt_could_throw_p (cfun, stmt))
     {
       error ("BB %i last statement has incorrectly set lp", bb->index);
       return true;
@@ -4678,7 +4781,7 @@ verify_eh_edges (gimple *stmt)
       return true;
     }
 
-  if (eh_edge->dest != label_to_block (lp->post_landing_pad))
+  if (eh_edge->dest != label_to_block (cfun, lp->post_landing_pad))
     {
       error ("Incorrect EH edge %i->%i", bb->index, eh_edge->dest->index);
       return true;
@@ -4710,7 +4813,7 @@ verify_eh_dispatch_edge (geh_dispatch *stmt)
     case ERT_TRY:
       for (c = r->u.eh_try.first_catch; c ; c = c->next_catch)
 	{
-	  dst = label_to_block (c->label);
+	  dst = label_to_block (cfun, c->label);
 	  e = find_edge (src, dst);
 	  if (e == NULL)
 	    {
@@ -4729,7 +4832,7 @@ verify_eh_dispatch_edge (geh_dispatch *stmt)
       break;
 
     case ERT_ALLOWED_EXCEPTIONS:
-      dst = label_to_block (r->u.allowed.label);
+      dst = label_to_block (cfun, r->u.allowed.label);
       e = find_edge (src, dst);
       if (e == NULL)
 	{

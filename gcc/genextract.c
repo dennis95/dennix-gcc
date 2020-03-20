@@ -1,5 +1,5 @@
 /* Generate code from machine description to extract operands from insn as rtl.
-   Copyright (C) 1987-2016 Free Software Foundation, Inc.
+   Copyright (C) 1987-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -33,9 +33,10 @@ along with GCC; see the file COPYING3.  If not see
 
    The string for each operand describes that path to the operand and
    contains `0' through `9' when going into an expression and `a' through
-   `z' when going into a vector.  We assume here that only the first operand
-   of an rtl expression is a vector.  genrecog.c makes the same assumption
-   (and uses the same representation) and it is currently true.  */
+   `z' then 'A' through to 'Z' when going into a vector.  We assume here that
+   only the first operand of an rtl expression is a vector.  genrecog.c makes
+   the same assumption (and uses the same representation) and it is currently
+   true.  */
 
 typedef char *locstr;
 
@@ -69,14 +70,33 @@ static struct code_ptr *peepholes;
 
 struct accum_extract
 {
-  vec<locstr> oplocs;
-  vec<locstr> duplocs;
-  vec<int> dupnums;
-  vec<char> pathstr;
+  accum_extract () : oplocs (10), duplocs (10), dupnums (10), pathstr (20) {}
+
+  auto_vec<locstr> oplocs;
+  auto_vec<locstr> duplocs;
+  auto_vec<int> dupnums;
+  auto_vec<char> pathstr;
 };
 
 /* Forward declarations.  */
 static void walk_rtx (md_rtx_info *, rtx, struct accum_extract *);
+
+#define UPPER_OFFSET ('A' - ('z' - 'a' + 1))
+
+/* Convert integer OPERAND into a character - either into [a-zA-Z] for vector
+   operands or [0-9] for integer operands - and push onto the end of the path
+   in ACC.  */
+static void
+push_pathstr_operand (int operand, bool is_vector,
+		     struct accum_extract *acc)
+{
+  if (is_vector && 'a' + operand > 'z')
+    acc->pathstr.safe_push (operand + UPPER_OFFSET);
+  else if (is_vector)
+    acc->pathstr.safe_push (operand + 'a');
+  else
+    acc->pathstr.safe_push (operand + '0');
+}
 
 static void
 gen_insn (md_rtx_info *info)
@@ -87,11 +107,6 @@ gen_insn (md_rtx_info *info)
   struct code_ptr *link;
   struct accum_extract acc;
 
-  acc.oplocs.create (10);
-  acc.duplocs.create (10);
-  acc.dupnums.create (10);
-  acc.pathstr.create (20);
-
   /* Walk the insn's pattern, remembering at all times the path
      down to the walking point.  */
 
@@ -101,7 +116,7 @@ gen_insn (md_rtx_info *info)
   else
     for (i = XVECLEN (insn, 1) - 1; i >= 0; i--)
       {
-	acc.pathstr.safe_push ('a' + i);
+	push_pathstr_operand (i, true, &acc);
 	walk_rtx (info, XVECEXP (insn, 1, i), &acc);
 	acc.pathstr.pop ();
       }
@@ -142,7 +157,7 @@ gen_insn (md_rtx_info *info)
       /* This extraction is the same as ours.  Just link us in.  */
       link->next = p->insns;
       p->insns = link;
-      goto done;
+      return;
     }
 
   /* Otherwise, make a new extraction method.  We stash the arrays
@@ -166,12 +181,6 @@ gen_insn (md_rtx_info *info)
   memcpy (p->oplocs, acc.oplocs.address (), op_count * sizeof (locstr));
   memcpy (p->duplocs, acc.duplocs.address (), dup_count * sizeof (locstr));
   memcpy (p->dupnums, acc.dupnums.address (), dup_count * sizeof (int));
-
- done:
-  acc.oplocs.release ();
-  acc.duplocs.release ();
-  acc.dupnums.release ();
-  acc.pathstr.release ();
 }
 
 /* Helper subroutine of walk_rtx: given a vec<locstr>, an index, and a
@@ -217,7 +226,7 @@ static void
 walk_rtx (md_rtx_info *info, rtx x, struct accum_extract *acc)
 {
   RTX_CODE code;
-  int i, len, base;
+  int i, len;
   const char *fmt;
 
   if (x == 0)
@@ -243,10 +252,9 @@ walk_rtx (md_rtx_info *info, rtx x, struct accum_extract *acc)
       VEC_safe_set_locstr (info, &acc->oplocs, XINT (x, 0),
 			   VEC_char_to_string (acc->pathstr));
 
-      base = (code == MATCH_OPERATOR ? '0' : 'a');
       for (i = XVECLEN (x, 2) - 1; i >= 0; i--)
 	{
-	  acc->pathstr.safe_push (base + i);
+	  push_pathstr_operand (i, code != MATCH_OPERATOR, acc);
 	  walk_rtx (info, XVECEXP (x, 2, i), acc);
 	  acc->pathstr.pop ();
         }
@@ -261,10 +269,9 @@ walk_rtx (md_rtx_info *info, rtx x, struct accum_extract *acc)
       if (code == MATCH_DUP)
 	break;
 
-      base = (code == MATCH_OP_DUP ? '0' : 'a');
       for (i = XVECLEN (x, 1) - 1; i >= 0; i--)
         {
-	  acc->pathstr.safe_push (base + i);
+	  push_pathstr_operand (i, code != MATCH_OP_DUP, acc);
 	  walk_rtx (info, XVECEXP (x, 1, i), acc);
 	  acc->pathstr.pop ();
         }
@@ -280,7 +287,7 @@ walk_rtx (md_rtx_info *info, rtx x, struct accum_extract *acc)
     {
       if (fmt[i] == 'e' || fmt[i] == 'u')
 	{
-	  acc->pathstr.safe_push ('0' + i);
+	  push_pathstr_operand (i, false, acc);
 	  walk_rtx (info, XEXP (x, i), acc);
 	  acc->pathstr.pop ();
 	}
@@ -289,7 +296,7 @@ walk_rtx (md_rtx_info *info, rtx x, struct accum_extract *acc)
 	  int j;
 	  for (j = XVECLEN (x, i) - 1; j >= 0; j--)
 	    {
-	      acc->pathstr.safe_push ('a' + j);
+	      push_pathstr_operand (j, true, acc);
 	      walk_rtx (info, XVECEXP (x, i, j), acc);
 	      acc->pathstr.pop ();
 	    }
@@ -320,7 +327,7 @@ print_path (const char *path)
 
   for (i = len - 1; i >= 0 ; i--)
     {
-      if (ISLOWER (path[i]))
+      if (ISLOWER (path[i]) || ISUPPER (path[i]))
 	fputs ("XVECEXP (", stdout);
       else if (ISDIGIT (path[i]))
 	fputs ("XEXP (", stdout);
@@ -332,7 +339,9 @@ print_path (const char *path)
 
   for (i = 0; i < len; i++)
     {
-      if (ISLOWER (path[i]))
+      if (ISUPPER (path[i]))
+	printf (", 0, %d)", path[i] - UPPER_OFFSET);
+      else if (ISLOWER (path[i]))
 	printf (", 0, %d)", path[i] - 'a');
       else if (ISDIGIT (path[i]))
 	printf (", %d)", path[i] - '0');
@@ -352,6 +361,7 @@ print_header (void)
 /* Generated automatically by the program `genextract'\n\
    from the machine description file `md'.  */\n\
 \n\
+#define IN_TARGET_CODE 1\n\
 #include \"config.h\"\n\
 #include \"system.h\"\n\
 #include \"coretypes.h\"\n\
@@ -394,7 +404,7 @@ insn_extract (rtx_insn *insn)\n{\n\
 }
 
 int
-main (int argc, char **argv)
+main (int argc, const char **argv)
 {
   unsigned int i;
   struct extraction *p;

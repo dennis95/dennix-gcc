@@ -1,6 +1,6 @@
 ## Makefile for the VTV library.
 ##
-## Copyright (C) 2013-2015 Free Software Foundation, Inc.
+## Copyright (C) 2013-2019 Free Software Foundation, Inc.
 ##
 ## Process this file with automake to produce Makefile.in.
 ##
@@ -28,7 +28,7 @@ endif
 ACLOCAL_AMFLAGS = -I .. -I ../config
 
 # May be used by toolexeclibdir.
-gcc_version := $(shell cat $(top_srcdir)/../gcc/BASE-VER)
+gcc_version := $(shell @get_gcc_base_ver@ $(top_srcdir)/../gcc/BASE-VER)
 
 DEFS = @DEFS@
 AM_CPPFLAGS = -I$(top_srcdir)/../include
@@ -38,10 +38,11 @@ AM_CXXFLAGS = $(XCFLAGS)
 AM_CXXFLAGS += $(LIBSTDCXX_RAW_CXX_CXXFLAGS)
 AM_CXXFLAGS += -Wl,-u_vtable_map_vars_start,-u_vtable_map_vars_end
 
-if VTV_CYGMIN
-  toolexeclib_LTLIBRARIES = libvtv.la libvtv_stubs.la
-else
+if ENABLE_VTABLE_VERIFY
   toolexeclib_LTLIBRARIES = libvtv.la
+if VTV_CYGMIN
+  toolexeclib_LTLIBRARIES += libvtv_stubs.la
+endif
 endif
 
 vtv_headers = \
@@ -121,3 +122,5 @@ LTCXXCOMPILE = $(LIBTOOL) --tag=CXX $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) \
 CXXLINK = $(LIBTOOL) --tag=CXX $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) \
 	--mode=link $(CXXVTV) $(AM_CXXFLAGS) $(CXXFLAGS) $(AM_LDFLAGS) \
 	$(LDFLAGS) -o $@
+
+include $(top_srcdir)/../multilib.am

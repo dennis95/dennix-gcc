@@ -1,5 +1,5 @@
 ;;  Machine Description for Renesas RL78 processors
-;;  Copyright (C) 2011-2016 Free Software Foundation, Inc.
+;;  Copyright (C) 2011-2019 Free Software Foundation, Inc.
 ;;  Contributed by Red Hat.
 
 ;; This file is part of GCC.
@@ -65,6 +65,14 @@
   [(set_attr "valloc" "op1")]
 )
 
+(define_insn "*bswaphi2_virt"
+  [(set (match_operand:HI           0 "rl78_nonfar_nonimm_operand" "=vm")
+        (bswap:HI (match_operand:HI 1 "general_operand"  "vim")))]
+  "rl78_virt_insns_ok ()"
+  "v.bswaphi\t%0, %1"
+  [(set_attr "valloc" "op1")]
+)
+
 ;;---------- Conversions ------------------------
 
 (define_insn "*zero_extendqihi2_virt"
@@ -116,7 +124,7 @@
   [(set (match_operand:HI          0 "register_operand" "=v")
         (mult:HI (match_operand:HI 1 "rl78_nonfar_operand" "%vim")
                  (match_operand:HI 2 "rl78_24_operand" "Ni")))]
-  "rl78_virt_insns_ok () && !TARGET_G10"
+  "rl78_virt_insns_ok ()"
   "v.mulu\t%0, %1, %2"
   [(set_attr "valloc" "umul")]
 )
@@ -125,7 +133,7 @@
   [(set (match_operand:HI                          0 "register_operand" "=v")
         (mult:HI (zero_extend:HI (match_operand:QI 1 "rl78_nonfar_operand" "%vim"))
                  (zero_extend:HI (match_operand:QI 2 "general_operand" "vim"))))]
-  "rl78_virt_insns_ok () && !TARGET_G10"
+  "rl78_virt_insns_ok ()"
   "v.mulu\t%0, %2"
   [(set_attr "valloc" "umul")]
 )

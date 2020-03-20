@@ -1,7 +1,7 @@
 /* Data structures and declarations used for reading and writing
    GIMPLE to a file stream.
 
-   Copyright (C) 2009-2016 Free Software Foundation, Inc.
+   Copyright (C) 2009-2019 Free Software Foundation, Inc.
    Contributed by Doug Kwan <dougkwan@google.com>
 
 This file is part of GCC.
@@ -26,14 +26,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "plugin-api.h"
 #include "gcov-io.h"
 #include "diagnostic.h"
-
-/* Define when debugging the LTO streamer.  This causes the writer
-   to output the numeric value for the memory address of the tree node
-   being emitted.  When debugging a problem in the reader, check the
-   original address that the writer was emitting using lto_orig_address_get.
-   With this value, set a breakpoint in the writer (e.g., lto_output_tree)
-   to trace how the faulty node is being emitted.  */
-/* #define LTO_STREAMER_DEBUG	1  */
 
 /* The encoding for a function consists of the following sections:
 
@@ -128,8 +120,8 @@ along with GCC; see the file COPYING3.  If not see
      String are represented in the table as pairs, a length in ULEB128
      form followed by the data for the string.  */
 
-#define LTO_major_version 5
-#define LTO_minor_version 0
+#define LTO_major_version 8
+#define LTO_minor_version 1
 
 typedef unsigned char	lto_decl_flags_t;
 
@@ -161,9 +153,6 @@ enum LTO_tags
 
   /* EH region holding the previous statement.  */
   LTO_eh_region,
-
-  /* An MD or NORMAL builtin.  Only the code and class are streamed out.  */
-  LTO_builtin_decl,
 
   /* Shared INTEGER_CST node.  */
   LTO_integer_cst,
@@ -239,7 +228,7 @@ enum lto_section_type
   LTO_section_symtab_nodes,
   LTO_section_opts,
   LTO_section_cgraph_opt_sum,
-  LTO_section_inline_summary,
+  LTO_section_ipa_fn_summary,
   LTO_section_ipcp_transform,
   LTO_section_ipa_icf,
   LTO_section_offload_table,
@@ -593,7 +582,7 @@ struct GTY(()) lto_file_decl_data
   vec<res_pair>  GTY((skip)) respairs;
   unsigned max_index;
 
-  struct gcov_ctr_summary GTY((skip)) profile_info;
+  gcov_summary GTY((skip)) profile_info;
 
   /* Map assigning declarations their resolutions.  */
   hash_map<tree, ld_plugin_symbol_resolution> * GTY((skip)) resolution_map;
@@ -839,12 +828,7 @@ extern char *lto_get_section_name (int, const char *, struct lto_file_decl_data 
 extern void print_lto_report (const char *);
 extern void lto_streamer_init (void);
 extern bool gate_lto_out (void);
-#ifdef LTO_STREAMER_DEBUG
-extern void lto_orig_address_map (tree, intptr_t);
-extern intptr_t lto_orig_address_get (tree);
-extern void lto_orig_address_remove (tree);
-#endif
-extern void lto_check_version (int, int);
+extern void lto_check_version (int, int, const char *);
 extern void lto_streamer_hooks_init (void);
 
 /* In lto-streamer-in.c */
@@ -895,6 +879,7 @@ void lto_output_decl_state_refs (struct output_block *,
 			         struct lto_out_decl_state *);
 void lto_output_location (struct output_block *, struct bitpack_d *, location_t);
 void lto_output_init_mode_table (void);
+void lto_prepare_function_for_streaming (cgraph_node *);
 
 
 /* In lto-cgraph.c  */
@@ -935,9 +920,11 @@ void cl_target_option_stream_in (struct data_in *,
 				 struct bitpack_d *,
 				 struct cl_target_option *);
 
-void cl_optimization_stream_out (struct bitpack_d *, struct cl_optimization *);
+void cl_optimization_stream_out (struct output_block *,
+				 struct bitpack_d *, struct cl_optimization *);
 
-void cl_optimization_stream_in (struct bitpack_d *, struct cl_optimization *);
+void cl_optimization_stream_in (struct data_in *,
+				struct bitpack_d *, struct cl_optimization *);
 
 
 
@@ -1227,5 +1214,16 @@ DEFINE_DECL_STREAM_FUNCS (VAR_DECL, var_decl)
 DEFINE_DECL_STREAM_FUNCS (TYPE_DECL, type_decl)
 DEFINE_DECL_STREAM_FUNCS (NAMESPACE_DECL, namespace_decl)
 DEFINE_DECL_STREAM_FUNCS (LABEL_DECL, label_decl)
+
+/* Entry for the delayed registering of decl -> DIE references.  */
+struct dref_entry {
+    tree decl;
+    const char *sym;
+    unsigned HOST_WIDE_INT off;
+};
+
+extern vec<dref_entry> dref_queue;
+
+extern FILE *streamer_dump_file;
 
 #endif /* GCC_LTO_STREAMER_H  */

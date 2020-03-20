@@ -1,5 +1,5 @@
 /* real.c - software floating point emulation.
-   Copyright (C) 1993-2016 Free Software Foundation, Inc.
+   Copyright (C) 1993-2019 Free Software Foundation, Inc.
    Contributed by Stephen L. Moshier (moshier@world.std.com).
    Re-written by Richard Henderson <rth@redhat.com>
 
@@ -960,11 +960,11 @@ do_compare (const REAL_VALUE_TYPE *a, const REAL_VALUE_TYPE *b,
       gcc_unreachable ();
     }
 
-  if (a->sign != b->sign)
-    return -a->sign - -b->sign;
-
   if (a->decimal || b->decimal)
     return decimal_do_compare (a, b, nan_result);
+
+  if (a->sign != b->sign)
+    return -a->sign - -b->sign;
 
   if (REAL_EXP (a) > REAL_EXP (b))
     ret = 1;
@@ -1395,7 +1395,7 @@ real_to_integer (const REAL_VALUE_TYPE *r)
     case rvc_inf:
     case rvc_nan:
     overflow:
-      i = (unsigned HOST_WIDE_INT) 1 << (HOST_BITS_PER_WIDE_INT - 1);
+      i = HOST_WIDE_INT_1U << (HOST_BITS_PER_WIDE_INT - 1);
       if (!r->sign)
 	i--;
       return i;
@@ -2266,7 +2266,7 @@ real_from_integer (REAL_VALUE_TYPE *r, format_helper fmt,
 
   if (fmt.decimal_p ())
     decimal_from_integer (r);
-  else if (fmt)
+  if (fmt)
     real_convert (r, fmt, r);
 }
 
@@ -2667,6 +2667,7 @@ round_for_format (const struct real_format *fmt, REAL_VALUE_TYPE *r)
     {
     underflow:
       get_zero (r, r->sign);
+      /* FALLTHRU */
     case rvc_zero:
       if (!fmt->has_signed_zero)
 	r->sign = 0;
@@ -2886,7 +2887,7 @@ real_hash (const REAL_VALUE_TYPE *r)
       return h;
 
     case rvc_normal:
-      h |= REAL_EXP (r) << 3;
+      h |= (unsigned int)REAL_EXP (r) << 3;
       break;
 
     case rvc_nan:
@@ -3042,6 +3043,7 @@ const struct real_format ieee_single_format =
     128,
     31,
     31,
+    32,
     false,
     true,
     true,
@@ -3064,6 +3066,7 @@ const struct real_format mips_single_format =
     128,
     31,
     31,
+    32,
     false,
     true,
     true,
@@ -3086,6 +3089,7 @@ const struct real_format motorola_single_format =
     128,
     31,
     31,
+    32,
     false,
     true,
     true,
@@ -3119,6 +3123,7 @@ const struct real_format spu_single_format =
     129,
     31,
     31,
+    0,
     true,
     false,
     false,
@@ -3329,6 +3334,7 @@ const struct real_format ieee_double_format =
     1024,
     63,
     63,
+    64,
     false,
     true,
     true,
@@ -3351,6 +3357,7 @@ const struct real_format mips_double_format =
     1024,
     63,
     63,
+    64,
     false,
     true,
     true,
@@ -3373,6 +3380,7 @@ const struct real_format motorola_double_format =
     1024,
     63,
     63,
+    64,
     false,
     true,
     true,
@@ -3718,6 +3726,7 @@ const struct real_format ieee_extended_motorola_format =
     16384,
     95,
     95,
+    0,
     false,
     true,
     true,
@@ -3740,6 +3749,7 @@ const struct real_format ieee_extended_intel_96_format =
     16384,
     79,
     79,
+    65,
     false,
     true,
     true,
@@ -3762,6 +3772,7 @@ const struct real_format ieee_extended_intel_128_format =
     16384,
     79,
     79,
+    65,
     false,
     true,
     true,
@@ -3786,6 +3797,7 @@ const struct real_format ieee_extended_intel_96_round_53_format =
     16384,
     79,
     79,
+    33,
     false,
     true,
     true,
@@ -3875,6 +3887,7 @@ const struct real_format ibm_extended_format =
     1024,
     127,
     -1,
+    0,
     false,
     true,
     true,
@@ -3897,6 +3910,7 @@ const struct real_format mips_extended_format =
     1024,
     127,
     -1,
+    0,
     false,
     true,
     true,
@@ -4161,6 +4175,7 @@ const struct real_format ieee_quad_format =
     16384,
     127,
     127,
+    128,
     false,
     true,
     true,
@@ -4183,6 +4198,7 @@ const struct real_format mips_quad_format =
     16384,
     127,
     127,
+    128,
     false,
     true,
     true,
@@ -4484,6 +4500,7 @@ const struct real_format vax_f_format =
     127,
     15,
     15,
+    0,
     false,
     false,
     false,
@@ -4506,6 +4523,7 @@ const struct real_format vax_d_format =
     127,
     15,
     15,
+    0,
     false,
     false,
     false,
@@ -4528,6 +4546,7 @@ const struct real_format vax_g_format =
     1023,
     15,
     15,
+    0,
     false,
     false,
     false,
@@ -4605,6 +4624,7 @@ const struct real_format decimal_single_format =
     97,
     31,
     31,
+    32,
     false,
     true,
     true,
@@ -4628,6 +4648,7 @@ const struct real_format decimal_double_format =
     385,
     63,
     63,
+    64,
     false,
     true,
     true,
@@ -4651,6 +4672,7 @@ const struct real_format decimal_quad_format =
     6145,
     127,
     127,
+    128,
     false,
     true,
     true,
@@ -4789,6 +4811,7 @@ const struct real_format ieee_half_format =
     16,
     15,
     15,
+    16,
     false,
     true,
     true,
@@ -4814,6 +4837,7 @@ const struct real_format arm_half_format =
     17,
     15,
     15,
+    0,
     false,
     true,
     false,
@@ -4860,6 +4884,7 @@ const struct real_format real_internal_format =
     MAX_EXP,
     -1,
     -1,
+    0,
     false,
     false,
     true,
@@ -4903,7 +4928,7 @@ real_powi (REAL_VALUE_TYPE *r, format_helper fmt,
     neg = false;
 
   t = *x;
-  bit = (unsigned HOST_WIDE_INT) 1 << (HOST_BITS_PER_WIDE_INT - 1);
+  bit = HOST_WIDE_INT_1U << (HOST_BITS_PER_WIDE_INT - 1);
   for (i = 0; i < HOST_BITS_PER_WIDE_INT; i++)
     {
       if (init)
@@ -5023,6 +5048,102 @@ real_isinteger (const REAL_VALUE_TYPE *c, HOST_WIDE_INT *int_out)
   return false;
 }
 
+/* Calculate nextafter (X, Y) or nexttoward (X, Y).  Return true if
+   underflow or overflow needs to be raised.  */
+
+bool
+real_nextafter (REAL_VALUE_TYPE *r, format_helper fmt,
+		const REAL_VALUE_TYPE *x, const REAL_VALUE_TYPE *y)
+{
+  int cmp = do_compare (x, y, 2);
+  /* If either operand is NaN, return qNaN.  */
+  if (cmp == 2)
+    {
+      get_canonical_qnan (r, 0);
+      return false;
+    }
+  /* If x == y, return y cast to target type.  */
+  if (cmp == 0)
+    {
+      real_convert (r, fmt, y);
+      return false;
+    }
+
+  if (x->cl == rvc_zero)
+    {
+      get_zero (r, y->sign);
+      r->cl = rvc_normal;
+      SET_REAL_EXP (r, fmt->emin - fmt->p + 1);
+      r->sig[SIGSZ - 1] = SIG_MSB;
+      return false;
+    }
+
+  int np2 = SIGNIFICAND_BITS - fmt->p;
+  /* For denormals adjust np2 correspondingly.  */
+  if (x->cl == rvc_normal && REAL_EXP (x) < fmt->emin)
+    np2 += fmt->emin - REAL_EXP (x);
+
+  REAL_VALUE_TYPE u;
+  get_zero (r, x->sign);
+  get_zero (&u, 0);
+  set_significand_bit (&u, np2);
+  r->cl = rvc_normal;
+  SET_REAL_EXP (r, REAL_EXP (x));
+
+  if (x->cl == rvc_inf)
+    {
+      bool borrow = sub_significands (r, r, &u, 0);
+      gcc_assert (borrow);
+      SET_REAL_EXP (r, fmt->emax);
+    }
+  else if (cmp == (x->sign ? 1 : -1))
+    {
+      if (add_significands (r, x, &u))
+	{
+	  /* Overflow.  Means the significand had been all ones, and
+	     is now all zeros.  Need to increase the exponent, and
+	     possibly re-normalize it.  */
+	  SET_REAL_EXP (r, REAL_EXP (r) + 1);
+	  if (REAL_EXP (r) > fmt->emax)
+	    {
+	      get_inf (r, x->sign);
+	      return true;
+	    }
+	  r->sig[SIGSZ - 1] = SIG_MSB;
+	}
+    }
+  else
+    {
+      if (REAL_EXP (x) > fmt->emin && x->sig[SIGSZ - 1] == SIG_MSB)
+	{
+	  int i;
+	  for (i = SIGSZ - 2; i >= 0; i--)
+	    if (x->sig[i])
+	      break;
+	  if (i < 0)
+	    {
+	      /* When mantissa is 1.0, we need to subtract only
+		 half of u: nextafter (1.0, 0.0) is 1.0 - __DBL_EPSILON__ / 2
+		 rather than 1.0 - __DBL_EPSILON__.  */
+	      clear_significand_bit (&u, np2);
+	      np2--;
+	      set_significand_bit (&u, np2);
+	    }
+	}
+      sub_significands (r, x, &u, 0);
+    }
+
+  /* Clear out trailing garbage.  */
+  clear_significand_below (r, np2);
+  normalize (r);
+  if (REAL_EXP (r) <= fmt->emin - fmt->p)
+    {
+      get_zero (r, x->sign);
+      return true;
+    }
+  return r->cl == rvc_zero || REAL_EXP (r) < fmt->emin;
+}
+
 /* Write into BUF the maximum representable finite floating-point
    number, (1 - b**-p) * b**emax for a given FP format FMT as a hex
    float string.  LEN is the size of BUF, and the buffer must be large
@@ -5053,6 +5174,19 @@ get_max_float (const struct real_format *fmt, char *buf, size_t len)
     }
 
   gcc_assert (strlen (buf) < len);
+}
+
+/* True if all values of integral type can be represented
+   by this floating-point type exactly.  */
+
+bool format_helper::can_represent_integral_type_p (tree type) const
+{
+  gcc_assert (! decimal_p () && INTEGRAL_TYPE_P (type));
+
+  /* INT?_MIN is power-of-two so it takes
+     only one mantissa bit.  */
+  bool signed_p = TYPE_SIGN (type) == SIGNED;
+  return TYPE_PRECISION (type) - signed_p <= significand_size (*this);
 }
 
 /* True if mode M has a NaN representation and
@@ -5157,4 +5291,30 @@ bool
 HONOR_SIGN_DEPENDENT_ROUNDING (const_rtx x)
 {
   return HONOR_SIGN_DEPENDENT_ROUNDING (GET_MODE (x));
+}
+
+/* Fills r with the largest value such that 1 + r*r won't overflow.
+   This is used in both sin (atan (x)) and cos (atan(x)) optimizations. */
+
+void
+build_sinatan_real (REAL_VALUE_TYPE * r, tree type)
+{
+  REAL_VALUE_TYPE maxval;
+  mpfr_t mpfr_const1, mpfr_c, mpfr_maxval;
+  machine_mode mode = TYPE_MODE (type);
+  const struct real_format * fmt = REAL_MODE_FORMAT (mode);
+
+  real_maxval (&maxval, 0, mode);
+
+  mpfr_inits (mpfr_const1, mpfr_c, mpfr_maxval, NULL);
+
+  mpfr_from_real (mpfr_const1, &dconst1, GMP_RNDN);
+  mpfr_from_real (mpfr_maxval, &maxval,  GMP_RNDN);
+
+  mpfr_sub (mpfr_c, mpfr_maxval, mpfr_const1, GMP_RNDN);
+  mpfr_sqrt (mpfr_c, mpfr_c, GMP_RNDZ);
+
+  real_from_mpfr (r, mpfr_c, fmt, GMP_RNDZ);
+  
+  mpfr_clears (mpfr_const1, mpfr_c, mpfr_maxval, NULL);
 }

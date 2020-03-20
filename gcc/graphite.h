@@ -1,5 +1,5 @@
 /* Graphite polyhedral representation.
-   Copyright (C) 2009-2016 Free Software Foundation, Inc.
+   Copyright (C) 2009-2019 Free Software Foundation, Inc.
    Contributed by Sebastian Pop <sebastian.pop@amd.com> and
    Tobias Grosser <grosser@fim.uni-passau.de>.
 
@@ -25,7 +25,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "sese.h"
 #include <isl/options.h>
 #include <isl/ctx.h>
-#include <isl/val_gmp.h>
+#include <isl/val.h>
 #include <isl/set.h>
 #include <isl/union_set.h>
 #include <isl/map.h>
@@ -36,16 +36,9 @@ along with GCC; see the file COPYING3.  If not see
 #include <isl/ilp.h>
 #include <isl/schedule.h>
 #include <isl/ast_build.h>
-
-#ifdef HAVE_ISL_OPTIONS_SET_SCHEDULE_SERIALIZE_SCCS
-/* isl 0.15 or later.  */
 #include <isl/schedule_node.h>
-
-#else
-/* isl 0.14 or 0.13.  */
-# define isl_stat int
-# define isl_stat_ok 0
-#endif
+#include <isl/id.h>
+#include <isl/space.h>
 
 typedef struct poly_dr *poly_dr_p;
 
@@ -267,18 +260,7 @@ struct poly_bb
      The number of variables in the DOMAIN may change and is not
      related to the number of loops in the original code.  */
   isl_set *domain;
-#ifdef HAVE_ISL_OPTIONS_SET_SCHEDULE_SERIALIZE_SCCS
   isl_set *iterators;
-#else
-  /* The original scattering.  */
-  isl_map *schedule;
-
-  /* The transformed scattering.  */
-  isl_map *transformed;
-
-  /* A copy of the transformed scattering.  */
-  isl_map *saved;
-#endif
 
   /* The data references we access.  */
   vec<poly_dr_p> drs;
@@ -399,6 +381,9 @@ struct scop
   /* Number of parameters in SCoP.  */
   graphite_dim_t nb_params;
 
+  /* The maximum alias set as assigned to drs by build_alias_sets.  */
+  unsigned max_alias_set;
+
   /* All the basic blocks in this scop that contain memory references
      and that will be represented as statements in the polyhedral
      representation.  */
@@ -425,16 +410,11 @@ struct scop
   /* The context used internally by isl.  */
   isl_ctx *isl_context;
 
-#ifdef HAVE_ISL_OPTIONS_SET_SCHEDULE_SERIALIZE_SCCS
   /* SCoP original schedule.  */
   isl_schedule *original_schedule;
 
   /* SCoP transformed schedule.  */
   isl_schedule *transformed_schedule;
-#else
-  /* SCoP final schedule.  */
-  isl_schedule *schedule;
-#endif
 
   /* The data dependence relation among the data references in this scop.  */
   isl_union_map *dependence;
@@ -470,11 +450,7 @@ scop_set_nb_params (scop_p scop, graphite_dim_t nb_params)
   scop->nb_params = nb_params;
 }
 
-#ifdef HAVE_ISL_OPTIONS_SET_SCHEDULE_SERIALIZE_SCCS
 extern void scop_get_dependences (scop_p scop);
-#else
-extern isl_union_map *scop_get_dependences (scop_p scop);
-#endif
 
 bool
 carries_deps (__isl_keep isl_union_map *schedule,
@@ -484,6 +460,7 @@ carries_deps (__isl_keep isl_union_map *schedule,
 extern bool build_poly_scop (scop_p);
 extern bool graphite_regenerate_ast_isl (scop_p);
 extern void build_scops (vec<scop_p> *);
+extern tree cached_scalar_evolution_in_region (const sese_l &, loop_p, tree);
 extern void dot_all_sese (FILE *, vec<sese_l> &);
 extern void dot_sese (sese_l &);
 extern void dot_cfg ();

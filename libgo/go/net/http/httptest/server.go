@@ -7,8 +7,8 @@
 package httptest
 
 import (
-	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
@@ -16,7 +16,7 @@ import (
 	"net/http"
 	"net/http/internal"
 	"os"
-	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +36,9 @@ type Server struct {
 	// before Start or StartTLS.
 	Config *http.Server
 
+	// certificate is a parsed version of the TLS config certificate, if present.
+	certificate *x509.Certificate
+
 	// wg counts the number of outstanding HTTP requests on this server.
 	// Close blocks until all requests are finished.
 	wg sync.WaitGroup
@@ -43,13 +46,17 @@ type Server struct {
 	mu     sync.Mutex // guards closed and conns
 	closed bool
 	conns  map[net.Conn]http.ConnState // except terminal states
+
+	// client is configured for use with the server.
+	// Its transport is automatically closed when Close is called.
+	client *http.Client
 }
 
 func newLocalListener() net.Listener {
-	if *serve != "" {
-		l, err := net.Listen("tcp", *serve)
+	if serveFlag != "" {
+		l, err := net.Listen("tcp", serveFlag)
 		if err != nil {
-			panic(fmt.Sprintf("httptest: failed to listen on %v: %v", *serve, err))
+			panic(fmt.Sprintf("httptest: failed to listen on %v: %v", serveFlag, err))
 		}
 		return l
 	}
@@ -66,7 +73,25 @@ func newLocalListener() net.Listener {
 // this flag lets you run
 //	go test -run=BrokenTest -httptest.serve=127.0.0.1:8000
 // to start the broken server so you can interact with it manually.
-var serve = flag.String("httptest.serve", "", "if non-empty, httptest.NewServer serves on this address and blocks")
+// We only register this flag if it looks like the caller knows about it
+// and is trying to use it as we don't want to pollute flags and this
+// isn't really part of our API. Don't depend on this.
+var serveFlag string
+
+func init() {
+	if strSliceContainsPrefix(os.Args, "-httptest.serve=") || strSliceContainsPrefix(os.Args, "--httptest.serve=") {
+		flag.StringVar(&serveFlag, "httptest.serve", "", "if non-empty, httptest.NewServer serves on this address and blocks.")
+	}
+}
+
+func strSliceContainsPrefix(v []string, pre string) bool {
+	for _, s := range v {
+		if strings.HasPrefix(s, pre) {
+			return true
+		}
+	}
+	return false
+}
 
 // NewServer starts and returns a new Server.
 // The caller should call Close when finished, to shut it down.
@@ -94,10 +119,13 @@ func (s *Server) Start() {
 	if s.URL != "" {
 		panic("Server already started")
 	}
+	if s.client == nil {
+		s.client = &http.Client{Transport: &http.Transport{}}
+	}
 	s.URL = "http://" + s.Listener.Addr().String()
 	s.wrap()
 	s.goServe()
-	if *serve != "" {
+	if serveFlag != "" {
 		fmt.Fprintln(os.Stderr, "httptest: serving on", s.URL)
 		select {}
 	}
@@ -108,21 +136,36 @@ func (s *Server) StartTLS() {
 	if s.URL != "" {
 		panic("Server already started")
 	}
+	if s.client == nil {
+		s.client = &http.Client{Transport: &http.Transport{}}
+	}
 	cert, err := tls.X509KeyPair(internal.LocalhostCert, internal.LocalhostKey)
 	if err != nil {
 		panic(fmt.Sprintf("httptest: NewTLSServer: %v", err))
 	}
 
 	existingConfig := s.TLS
-	s.TLS = new(tls.Config)
 	if existingConfig != nil {
-		*s.TLS = *existingConfig
+		s.TLS = existingConfig.Clone()
+	} else {
+		s.TLS = new(tls.Config)
 	}
 	if s.TLS.NextProtos == nil {
 		s.TLS.NextProtos = []string{"http/1.1"}
 	}
 	if len(s.TLS.Certificates) == 0 {
 		s.TLS.Certificates = []tls.Certificate{cert}
+	}
+	s.certificate, err = x509.ParseCertificate(s.TLS.Certificates[0].Certificate[0])
+	if err != nil {
+		panic(fmt.Sprintf("httptest: NewTLSServer: %v", err))
+	}
+	certpool := x509.NewCertPool()
+	certpool.AddCert(s.certificate)
+	s.client.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs: certpool,
+		},
 	}
 	s.Listener = tls.NewListener(s.Listener, s.TLS)
 	s.URL = "https://" + s.Listener.Addr().String()
@@ -158,7 +201,7 @@ func (s *Server) Close() {
 			// previously-flaky tests) in the case of
 			// socket-late-binding races from the http Client
 			// dialing this server and then getting an idle
-			// connection before the dial completed.  There is thus
+			// connection before the dial completed. There is thus
 			// a connected connection in StateNew with no
 			// associated Request. We only close StateIdle and
 			// StateNew because they're not doing anything. It's
@@ -167,7 +210,7 @@ func (s *Server) Close() {
 			// few milliseconds wasn't liked (early versions of
 			// https://golang.org/cl/15151) so now we just
 			// forcefully close StateNew. The docs for Server.Close say
-			// we wait for "oustanding requests", so we don't close things
+			// we wait for "outstanding requests", so we don't close things
 			// in StateActive.
 			if st == http.StateIdle || st == http.StateNew {
 				s.closeConn(c)
@@ -186,13 +229,20 @@ func (s *Server) Close() {
 		t.CloseIdleConnections()
 	}
 
+	// Also close the client idle connections.
+	if s.client != nil {
+		if t, ok := s.client.Transport.(closeIdleTransport); ok {
+			t.CloseIdleConnections()
+		}
+	}
+
 	s.wg.Wait()
 }
 
 func (s *Server) logCloseHangDebugInfo() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var buf bytes.Buffer
+	var buf strings.Builder
 	buf.WriteString("httptest.Server blocked in Close after 5 seconds, waiting for connections:\n")
 	for c, st := range s.conns {
 		fmt.Fprintf(&buf, "  %T %p %v in state %v\n", c, c, c.RemoteAddr(), st)
@@ -202,13 +252,11 @@ func (s *Server) logCloseHangDebugInfo() {
 
 // CloseClientConnections closes any open HTTP connections to the test Server.
 func (s *Server) CloseClientConnections() {
-	var conns int
-	ch := make(chan bool)
-
 	s.mu.Lock()
+	nconn := len(s.conns)
+	ch := make(chan struct{}, nconn)
 	for c := range s.conns {
-		conns++
-		s.closeConnChan(c, ch)
+		go s.closeConnChan(c, ch)
 	}
 	s.mu.Unlock()
 
@@ -220,7 +268,7 @@ func (s *Server) CloseClientConnections() {
 	// in tests.
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
-	for i := 0; i < conns; i++ {
+	for i := 0; i < nconn; i++ {
 		select {
 		case <-ch:
 		case <-timer.C:
@@ -228,6 +276,19 @@ func (s *Server) CloseClientConnections() {
 			return
 		}
 	}
+}
+
+// Certificate returns the certificate used by the server, or nil if
+// the server doesn't use TLS.
+func (s *Server) Certificate() *x509.Certificate {
+	return s.certificate
+}
+
+// Client returns an HTTP client configured for making requests to the server.
+// It is configured to trust the server's TLS test certificate and will
+// close its idle connections on Server.Close.
+func (s *Server) Client() *http.Client {
+	return s.client
 }
 
 func (s *Server) goServe() {
@@ -294,30 +355,11 @@ func (s *Server) closeConn(c net.Conn) { s.closeConnChan(c, nil) }
 
 // closeConnChan is like closeConn, but takes an optional channel to receive a value
 // when the goroutine closing c is done.
-func (s *Server) closeConnChan(c net.Conn, done chan<- bool) {
-	if runtime.GOOS == "plan9" {
-		// Go's Plan 9 net package isn't great at unblocking reads when
-		// their underlying TCP connections are closed.  Don't trust
-		// that that the ConnState state machine will get to
-		// StateClosed. Instead, just go there directly. Plan 9 may leak
-		// resources if the syscall doesn't end up returning. Oh well.
-		s.forgetConn(c)
+func (s *Server) closeConnChan(c net.Conn, done chan<- struct{}) {
+	c.Close()
+	if done != nil {
+		done <- struct{}{}
 	}
-
-	// Somewhere in the chaos of https://golang.org/cl/15151 we found that
-	// some types of conns were blocking in Close too long (or deadlocking?)
-	// and we had to call Close in a goroutine. I (bradfitz) forget what
-	// that was at this point, but I suspect it was *tls.Conns, which
-	// were later fixed in https://golang.org/cl/18572, so this goroutine
-	// is _probably_ unnecessary now. But it's too late in Go 1.6 too remove
-	// it with confidence.
-	// TODO(bradfitz): try to remove it for Go 1.7. (golang.org/issue/14291)
-	go func() {
-		c.Close()
-		if done != nil {
-			done <- true
-		}
-	}()
 }
 
 // forgetConn removes c from the set of tracked conns and decrements it from the

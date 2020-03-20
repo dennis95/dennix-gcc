@@ -1,5 +1,5 @@
 /* Header file for SSA iterators.
-   Copyright (C) 2013-2016 Free Software Foundation, Inc.
+   Copyright (C) 2013-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -93,6 +93,12 @@ struct imm_use_iterator
      break;							\
    }
 
+/* Similarly for return.  */
+#define RETURN_FROM_IMM_USE_STMT(ITER, VAL)			\
+  {								\
+    end_imm_use_stmt_traverse (&(ITER));			\
+    return (VAL);						\
+  }
 
 /* Use this iterator in combination with FOR_EACH_IMM_USE_STMT to
    get access to each occurrence of ssavar on the stmt returned by
@@ -447,7 +453,7 @@ num_imm_uses (const_tree var)
   const ssa_use_operand_t *ptr;
   unsigned int num = 0;
 
-  if (!MAY_HAVE_DEBUG_STMTS)
+  if (!MAY_HAVE_DEBUG_BIND_STMTS)
     {
       for (ptr = start->next; ptr != start; ptr = ptr->next)
 	if (USE_STMT (ptr))
@@ -607,6 +613,10 @@ op_iter_init (ssa_op_iter *ptr, gimple *stmt, int flags)
 	  case GIMPLE_ASM:
 	    ptr->numops = gimple_asm_noutputs (as_a <gasm *> (stmt));
 	    break;
+	  case GIMPLE_TRANSACTION:
+	    ptr->numops = 0;
+	    flags &= ~SSA_OP_DEF;
+	    break;
 	  default:
 	    ptr->numops = 0;
 	    flags &= ~(SSA_OP_DEF | SSA_OP_VDEF);
@@ -695,6 +705,15 @@ single_ssa_use_operand (gimple *stmt, int flags)
   return NULL_USE_OPERAND_P;
 }
 
+/* Return the single virtual use operand in STMT if present.  Otherwise
+   return NULL.  */
+static inline use_operand_p
+ssa_vuse_operand (gimple *stmt)
+{
+  if (! gimple_vuse (stmt))
+    return NULL_USE_OPERAND_P;
+  return USE_OP_PTR (gimple_use_ops (stmt));
+}
 
 
 /* If there is a single operand in STMT matching FLAGS, return it.  Otherwise

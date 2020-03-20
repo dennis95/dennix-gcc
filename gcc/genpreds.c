@@ -2,7 +2,7 @@
    - prototype declarations for operand predicates (tm-preds.h)
    - function definitions of operand predicates, if defined new-style
      (insn-preds.c)
-   Copyright (C) 2001-2016 Free Software Foundation, Inc.
+   Copyright (C) 2001-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -51,12 +51,12 @@ validate_exp (rtx exp, const char *name, file_location loc)
     case IF_THEN_ELSE:
       if (validate_exp (XEXP (exp, 2), name, loc))
 	return true;
-      /* else fall through */
+      /* fall through */
     case AND:
     case IOR:
       if (validate_exp (XEXP (exp, 1), name, loc))
 	return true;
-      /* else fall through */
+      /* fall through */
     case NOT:
       return validate_exp (XEXP (exp, 0), name, loc);
 
@@ -74,7 +74,7 @@ validate_exp (rtx exp, const char *name, file_location loc)
 	      }
 	  }
       }
-      /* fall through */
+      gcc_fallthrough ();
 
       /* These need no special checking.  */
     case MATCH_OPERAND:
@@ -152,9 +152,9 @@ write_predicate_subfunction (struct pred_data *p)
   p->exp = and_exp;
 
   printf ("static inline int\n"
-	  "%s_1 (rtx op, machine_mode mode ATTRIBUTE_UNUSED)\n",
+	  "%s_1 (rtx op ATTRIBUTE_UNUSED, machine_mode mode ATTRIBUTE_UNUSED)\n",
 	  p->name);
-  print_md_ptr_loc (p->c_block);
+  rtx_reader_ptr->print_md_ptr_loc (p->c_block);
   if (p->c_block[0] == '{')
     fputs (p->c_block, stdout);
   else
@@ -174,12 +174,12 @@ needs_variable (rtx exp, const char *var)
     case IF_THEN_ELSE:
       if (needs_variable (XEXP (exp, 2), var))
 	return true;
-      /* else fall through */
+      /* fall through */
     case AND:
     case IOR:
       if (needs_variable (XEXP (exp, 1), var))
 	return true;
-      /* else fall through */
+      /* fall through */
     case NOT:
       return needs_variable (XEXP (exp, 0), var);
 
@@ -538,7 +538,7 @@ write_predicate_expr (rtx exp)
       break;
 
     case MATCH_TEST:
-      print_c_condition (XSTR (exp, 0));
+      rtx_reader_ptr->print_c_condition (XSTR (exp, 0));
       break;
 
     default:
@@ -1204,7 +1204,8 @@ write_tm_constrs_h (void)
 
   printf ("\
 /* Generated automatically by the program '%s'\n\
-   from the machine description file '%s'.  */\n\n", progname, in_fname);
+   from the machine description file '%s'.  */\n\n", progname,
+	  md_reader_ptr->get_top_level_filename ());
 
   puts ("\
 #ifndef GCC_TM_CONSTRS_H\n\
@@ -1403,7 +1404,8 @@ write_tm_preds_h (void)
 
   printf ("\
 /* Generated automatically by the program '%s'\n\
-   from the machine description file '%s'.  */\n\n", progname, in_fname);
+   from the machine description file '%s'.  */\n\n", progname,
+	  md_reader_ptr->get_top_level_filename ());
 
   puts ("\
 #ifndef GCC_TM_PREDS_H\n\
@@ -1552,9 +1554,11 @@ write_insn_preds_c (void)
 
   printf ("\
 /* Generated automatically by the program '%s'\n\
-   from the machine description file '%s'.  */\n\n", progname, in_fname);
+   from the machine description file '%s'.  */\n\n", progname,
+	  md_reader_ptr->get_top_level_filename ());
 
   puts ("\
+#define IN_TARGET_CODE 1\n\
 #include \"config.h\"\n\
 #include \"system.h\"\n\
 #include \"coretypes.h\"\n\
@@ -1566,6 +1570,7 @@ write_insn_preds_c (void)
 #include \"varasm.h\"\n\
 #include \"stor-layout.h\"\n\
 #include \"calls.h\"\n\
+#include \"memmodel.h\"\n\
 #include \"tm_p.h\"\n\
 #include \"insn-config.h\"\n\
 #include \"recog.h\"\n\
@@ -1577,7 +1582,8 @@ write_insn_preds_c (void)
 #include \"reload.h\"\n\
 #include \"regs.h\"\n\
 #include \"emit-rtl.h\"\n\
-#include \"tm-constrs.h\"\n");
+#include \"tm-constrs.h\"\n\
+#include \"target.h\"\n");
 
   FOR_ALL_PREDICATES (p)
     write_one_predicate_function (p);
@@ -1618,7 +1624,7 @@ parse_option (const char *opt)
 
 /* Master control.  */
 int
-main (int argc, char **argv)
+main (int argc, const char **argv)
 {
   progname = argv[0];
   if (argc <= 1)

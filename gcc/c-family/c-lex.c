@@ -1,5 +1,5 @@
 /* Mainly the interface between cpplib and the C front ends.
-   Copyright (C) 1987-2016 Free Software Foundation, Inc.
+   Copyright (C) 1987-2019 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -27,6 +27,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "stor-layout.h"
 #include "c-pragma.h"
 #include "debug.h"
+#include "file-prefix-map.h" /* remap_macro_filename()  */
 
 #include "attribs.h"
 
@@ -80,6 +81,9 @@ init_c_lex (void)
   cb->valid_pch = c_common_valid_pch;
   cb->read_pch = c_common_read_pch;
   cb->has_attribute = c_common_has_attribute;
+  cb->get_source_date_epoch = cb_get_source_date_epoch;
+  cb->get_suggestion = cb_get_suggestion;
+  cb->remap_filename = remap_macro_filename;
 
   /* Set the debug callbacks if we can use them.  */
   if ((debug_info_level == DINFO_LEVEL_VERBOSE
@@ -99,9 +103,9 @@ get_fileinfo (const char *name)
   struct c_fileinfo *fi;
 
   if (!file_info_tree)
-    file_info_tree = splay_tree_new ((splay_tree_compare_fn) strcmp,
+    file_info_tree = splay_tree_new (splay_tree_compare_strings,
 				     0,
-				     (splay_tree_delete_value_fn) free);
+				     splay_tree_delete_pointers);
 
   n = splay_tree_lookup (file_info_tree, (splay_tree_key) name);
   if (n)
@@ -195,14 +199,14 @@ fe_file_change (const line_map_ordinary *new_map)
 	 we already did in compile_file.  */
       if (!MAIN_FILE_P (new_map))
 	{
-	  unsigned int included_at = LAST_SOURCE_LINE_LOCATION (new_map - 1);
+	  location_t included_at = linemap_included_from (new_map);
 	  int line = 0;
 	  if (included_at > BUILTINS_LOCATION)
 	    line = SOURCE_LINE (new_map - 1, included_at);
 
 	  input_location = new_map->start_location;
 	  (*debug_hooks->start_source_file) (line, LINEMAP_FILE (new_map));
-#ifndef NO_IMPLICIT_EXTERN_C
+#ifdef SYSTEM_IMPLICIT_EXTERN_C
 	  if (c_header_level)
 	    ++c_header_level;
 	  else if (LINEMAP_SYSP (new_map) == 2)
@@ -215,7 +219,7 @@ fe_file_change (const line_map_ordinary *new_map)
     }
   else if (new_map->reason == LC_LEAVE)
     {
-#ifndef NO_IMPLICIT_EXTERN_C
+#ifdef SYSTEM_IMPLICIT_EXTERN_C
       if (c_header_level && --c_header_level == 0)
 	{
 	  if (LINEMAP_SYSP (new_map) == 2)
@@ -233,7 +237,7 @@ fe_file_change (const line_map_ordinary *new_map)
 }
 
 static void
-cb_def_pragma (cpp_reader *pfile, source_location loc)
+cb_def_pragma (cpp_reader *pfile, location_t loc)
 {
   /* Issue a warning message if we have been asked to do so.  Ignore
      unknown pragmas in system headers unless an explicit
@@ -261,7 +265,7 @@ cb_def_pragma (cpp_reader *pfile, source_location loc)
 
 /* #define callback for DWARF and DWARF2 debug info.  */
 static void
-cb_define (cpp_reader *pfile, source_location loc, cpp_hashnode *node)
+cb_define (cpp_reader *pfile, location_t loc, cpp_hashnode *node)
 {
   const struct line_map *map = linemap_lookup (line_table, loc);
   (*debug_hooks->define) (SOURCE_LINE (linemap_check_ordinary (map), loc),
@@ -270,7 +274,7 @@ cb_define (cpp_reader *pfile, source_location loc, cpp_hashnode *node)
 
 /* #undef callback for DWARF and DWARF2 debug info.  */
 static void
-cb_undef (cpp_reader * ARG_UNUSED (pfile), source_location loc,
+cb_undef (cpp_reader * ARG_UNUSED (pfile), location_t loc,
 	  cpp_hashnode *node)
 {
   const struct line_map *map = linemap_lookup (line_table, loc);
@@ -314,6 +318,7 @@ c_common_has_attribute (cpp_reader *pfile)
     {
       attr_name = get_identifier ((const char *)
 				  cpp_token_as_text (pfile, token));
+      attr_name = canonicalize_attr_name (attr_name);
       if (c_dialect_cxx ())
 	{
 	  int idx = 0;
@@ -340,22 +345,31 @@ c_common_has_attribute (cpp_reader *pfile)
 		  attr_name = NULL_TREE;
 		}
 	    }
+	  else
+	    {
+	      /* Some standard attributes need special handling.  */
+	      if (is_attribute_p ("noreturn", attr_name))
+		result = 200809;
+	      else if (is_attribute_p ("deprecated", attr_name))
+		result = 201309;
+	      else if (is_attribute_p ("maybe_unused", attr_name)
+		       || is_attribute_p ("nodiscard", attr_name)
+		       || is_attribute_p ("fallthrough", attr_name))
+		result = 201603;
+	      else if (is_attribute_p ("no_unique_address", attr_name)
+		       || is_attribute_p ("likely", attr_name)
+		       || is_attribute_p ("unlikely", attr_name))
+		result = 201803;
+	      if (result)
+		attr_name = NULL_TREE;
+	    }
 	}
       if (attr_name)
 	{
 	  init_attributes ();
 	  const struct attribute_spec *attr = lookup_attribute_spec (attr_name);
 	  if (attr)
-	    {
-	      if (TREE_CODE (attr_name) == TREE_LIST)
-		attr_name = TREE_VALUE (attr_name);
-	      if (is_attribute_p ("noreturn", attr_name))
-		result = 200809;
-	      else if (is_attribute_p ("deprecated", attr_name))
-		result = 201309;
-	      else
-		result = 1;
-	    }
+	    result = 1;
 	}
     }
   else
@@ -380,7 +394,6 @@ enum cpp_ttype
 c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
 		  int lex_flags)
 {
-  static bool no_more_pch;
   const cpp_token *tok;
   enum cpp_ttype type;
   unsigned char add_flags = 0;
@@ -589,9 +602,21 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
     case CPP_MACRO_ARG:
       gcc_unreachable ();
 
-    /* CPP_COMMENT will appear when compiling with -C and should be
-       ignored.  */
-     case CPP_COMMENT:
+    /* CPP_COMMENT will appear when compiling with -C.  Ignore, except
+       when it is a FALLTHROUGH comment, in that case set
+       PREV_FALLTHROUGH flag on the next non-comment token.  */
+    case CPP_COMMENT:
+      if (tok->flags & PREV_FALLTHROUGH)
+	{
+	  do
+	    {
+	      tok = cpp_get_token_with_location (parse_in, loc);
+	      type = tok->type;
+	    }
+	  while (type == CPP_PADDING || type == CPP_COMMENT);
+	  add_flags |= PREV_FALLTHROUGH;
+	  goto retry_after_at;
+	}
        goto retry;
 
     default:
@@ -601,12 +626,6 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
 
   if (cpp_flags)
     *cpp_flags = tok->flags | add_flags;
-
-  if (!no_more_pch)
-    {
-      no_more_pch = true;
-      c_common_no_more_pch ();
-    }
 
   timevar_pop (TV_CPP);
 
@@ -834,6 +853,26 @@ interpret_float (const cpp_token *token, unsigned int flags,
 	type = c_common_type_for_mode (mode, 0);
 	gcc_assert (type);
       }
+    else if ((flags & (CPP_N_FLOATN | CPP_N_FLOATNX)) != 0)
+      {
+	unsigned int n = (flags & CPP_N_WIDTH_FLOATN_NX) >> CPP_FLOATN_SHIFT;
+	bool extended = (flags & CPP_N_FLOATNX) != 0;
+	type = NULL_TREE;
+	for (int i = 0; i < NUM_FLOATN_NX_TYPES; i++)
+	  if (floatn_nx_types[i].n == (int) n
+	      && floatn_nx_types[i].extended == extended)
+	    {
+	      type = FLOATN_NX_TYPE_NODE (i);
+	      break;
+	    }
+	if (type == NULL_TREE)
+	  {
+	    error ("unsupported non-standard suffix on floating constant");
+	    return error_mark_node;
+	  }
+	else
+	  pedwarn (input_location, OPT_Wpedantic, "non-standard suffix on floating constant");
+      }
     else if ((flags & CPP_N_WIDTH) == CPP_N_LARGE)
       type = long_double_type_node;
     else if ((flags & CPP_N_WIDTH) == CPP_N_SMALL
@@ -862,6 +901,17 @@ interpret_float (const cpp_token *token, unsigned int flags,
       if (flags & CPP_N_IMAGINARY)
 	/* I or J suffix.  */
 	copylen--;
+      if (flags & CPP_N_FLOATNX)
+	copylen--;
+      if (flags & (CPP_N_FLOATN | CPP_N_FLOATNX))
+	{
+	  unsigned int n = (flags & CPP_N_WIDTH_FLOATN_NX) >> CPP_FLOATN_SHIFT;
+	  while (n > 0)
+	    {
+	      copylen--;
+	      n /= 10;
+	    }
+	}
     }
 
   copy = (char *) alloca (copylen + 1);
@@ -937,7 +987,7 @@ interpret_float (const cpp_token *token, unsigned int flags,
     }
 
   if (type != const_type)
-    value = build1 (EXCESS_PRECISION_EXPR, type, value);
+    value = build1_loc (token->src_loc, EXCESS_PRECISION_EXPR, type, value);
 
   return value;
 }
@@ -1059,7 +1109,7 @@ interpret_fixed (const cpp_token *token, unsigned int flags)
   memcpy (copy, token->val.str.text, copylen);
   copy[copylen] = '\0';
 
-  fixed_from_string (&fixed, copy, TYPE_MODE (type));
+  fixed_from_string (&fixed, copy, SCALAR_TYPE_MODE (type));
 
   /* Create a node with determined type and value.  */
   value = build_fixed (type, fixed);
@@ -1092,13 +1142,16 @@ lex_string (const cpp_token *tok, tree *valp, bool objc_string, bool translate)
   tree value;
   size_t concats = 0;
   struct obstack str_ob;
+  struct obstack loc_ob;
   cpp_string istr;
   enum cpp_ttype type = tok->type;
 
   /* Try to avoid the overhead of creating and destroying an obstack
      for the common case of just one string.  */
   cpp_string str = tok->val.str;
+  location_t init_loc = tok->src_loc;
   cpp_string *strs = &str;
+  location_t *locs = NULL;
 
   /* objc_at_sign_was_seen is only used when doing Objective-C string
      concatenation.  It is 'true' if we have seen an '@' before the
@@ -1137,16 +1190,21 @@ lex_string (const cpp_token *tok, tree *valp, bool objc_string, bool translate)
 	  else
 	    error ("unsupported non-standard concatenation of string literals");
 	}
+      /* FALLTHROUGH */
 
     case CPP_STRING:
       if (!concats)
 	{
 	  gcc_obstack_init (&str_ob);
+	  gcc_obstack_init (&loc_ob);
 	  obstack_grow (&str_ob, &str, sizeof (cpp_string));
+	  obstack_grow (&loc_ob, &init_loc, sizeof (location_t));
 	}
 
       concats++;
       obstack_grow (&str_ob, &tok->val.str, sizeof (cpp_string));
+      obstack_grow (&loc_ob, &tok->src_loc, sizeof (location_t));
+
       if (objc_string)
 	objc_at_sign_was_seen = false;
       goto retry;
@@ -1159,7 +1217,10 @@ lex_string (const cpp_token *tok, tree *valp, bool objc_string, bool translate)
   /* We have read one more token than we want.  */
   _cpp_backup_tokens (parse_in, 1);
   if (concats)
-    strs = XOBFINISH (&str_ob, cpp_string *);
+    {
+      strs = XOBFINISH (&str_ob, cpp_string *);
+      locs = XOBFINISH (&loc_ob, location_t *);
+    }
 
   if (concats && !objc_string && !in_system_header_at (input_location))
     warning (OPT_Wtraditional,
@@ -1171,6 +1232,12 @@ lex_string (const cpp_token *tok, tree *valp, bool objc_string, bool translate)
     {
       value = build_string (istr.len, (const char *) istr.text);
       free (CONST_CAST (unsigned char *, istr.text));
+      if (concats)
+	{
+	  gcc_assert (locs);
+	  gcc_assert (g_string_concat_db);
+	  g_string_concat_db->record_string_concatenation (concats + 1, locs);
+	}
     }
   else
     {
@@ -1207,8 +1274,13 @@ lex_string (const cpp_token *tok, tree *valp, bool objc_string, bool translate)
     {
     default:
     case CPP_STRING:
-    case CPP_UTF8STRING:
       TREE_TYPE (value) = char_array_type_node;
+      break;
+    case CPP_UTF8STRING:
+      if (flag_char8_t)
+        TREE_TYPE (value) = char8_array_type_node;
+      else
+        TREE_TYPE (value) = char_array_type_node;
       break;
     case CPP_STRING16:
       TREE_TYPE (value) = char16_array_type_node;
@@ -1222,7 +1294,10 @@ lex_string (const cpp_token *tok, tree *valp, bool objc_string, bool translate)
   *valp = fix_string_type (value);
 
   if (concats)
-    obstack_free (&str_ob, 0);
+    {
+      obstack_free (&str_ob, 0);
+      obstack_free (&loc_ob, 0);
+    }
 
   return objc_string ? CPP_OBJC_STRING : type;
 }
@@ -1246,7 +1321,12 @@ lex_charconst (const cpp_token *token)
   else if (token->type == CPP_CHAR16)
     type = char16_type_node;
   else if (token->type == CPP_UTF8CHAR)
-    type = char_type_node;
+    {
+      if (flag_char8_t)
+        type = char8_type_node;
+      else
+        type = char_type_node;
+    }
   /* In C, a character constant has type 'int'.
      In C++ 'char', but multi-char charconsts have type 'int'.  */
   else if (!c_dialect_cxx () || chars_seen > 1)

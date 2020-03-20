@@ -5,8 +5,9 @@
 package http_test
 
 import (
-	"flag"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"runtime"
@@ -16,7 +17,7 @@ import (
 	"time"
 )
 
-var flaky = flag.Bool("flaky", false, "run known-flaky tests too")
+var quietLog = log.New(ioutil.Discard, "", 0)
 
 func TestMain(m *testing.M) {
 	v := m.Run()
@@ -36,6 +37,8 @@ func interestingGoroutines() (gs []string) {
 		}
 		stack := strings.TrimSpace(sl[1])
 		if stack == "" ||
+			strings.Contains(stack, "testing.(*M).before.func1") ||
+			strings.Contains(stack, "os/signal.signal_recv") ||
 			strings.Contains(stack, "created by net.startServer") ||
 			strings.Contains(stack, "created by testing.RunTests") ||
 			strings.Contains(stack, "closeWriteAndWait") ||
@@ -55,8 +58,9 @@ func interestingGoroutines() (gs []string) {
 
 // Verify the other tests didn't leave any goroutines running.
 func goroutineLeaked() bool {
-	if testing.Short() {
-		// not counting goroutines for leakage in -short mode
+	if testing.Short() || runningBenchmarks() {
+		// Don't worry about goroutine leaks in -short mode or in
+		// benchmark mode. Too distracting when there are false positives.
 		return false
 	}
 
@@ -91,10 +95,16 @@ func setParallel(t *testing.T) {
 	}
 }
 
-func setFlaky(t *testing.T, issue int) {
-	if !*flaky {
-		t.Skipf("skipping known flaky test; see golang.org/issue/%d", issue)
+func runningBenchmarks() bool {
+	for i, arg := range os.Args {
+		if strings.HasPrefix(arg, "-test.bench=") && !strings.HasSuffix(arg, "=") {
+			return true
+		}
+		if arg == "-test.bench" && i < len(os.Args)-1 && os.Args[i+1] != "" {
+			return true
+		}
 	}
+	return false
 }
 
 func afterTest(t testing.TB) {
@@ -104,12 +114,12 @@ func afterTest(t testing.TB) {
 	}
 	var bad string
 	badSubstring := map[string]string{
-		").readLoop(":                                  "a Transport",
-		").writeLoop(":                                 "a Transport",
+		").readLoop(":  "a Transport",
+		").writeLoop(": "a Transport",
 		"created by net/http/httptest.(*Server).Start": "an httptest.Server",
-		"timeoutHandler":                               "a TimeoutHandler",
-		"net.(*netFD).connect(":                        "a timing out dial",
-		").noteClientGone(":                            "a closenotifier sender",
+		"timeoutHandler":        "a TimeoutHandler",
+		"net.(*netFD).connect(": "a timing out dial",
+		").noteClientGone(":     "a closenotifier sender",
 	}
 	var stacks string
 	for i := 0; i < 4; i++ {
@@ -128,4 +138,31 @@ func afterTest(t testing.TB) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Errorf("Test appears to have leaked %s:\n%s", bad, stacks)
+}
+
+// waitCondition reports whether fn eventually returned true,
+// checking immediately and then every checkEvery amount,
+// until waitFor has elapsed, at which point it returns false.
+func waitCondition(waitFor, checkEvery time.Duration, fn func() bool) bool {
+	deadline := time.Now().Add(waitFor)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return true
+		}
+		time.Sleep(checkEvery)
+	}
+	return false
+}
+
+// waitErrCondition is like waitCondition but with errors instead of bools.
+func waitErrCondition(waitFor, checkEvery time.Duration, fn func() error) error {
+	deadline := time.Now().Add(waitFor)
+	var err error
+	for time.Now().Before(deadline) {
+		if err = fn(); err == nil {
+			return nil
+		}
+		time.Sleep(checkEvery)
+	}
+	return err
 }

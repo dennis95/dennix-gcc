@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -71,7 +71,7 @@ func (r *Reader) readLineSlice() ([]byte, error) {
 // ReadContinuedLine reads a possibly continued line from r,
 // eliding the final trailing ASCII white space.
 // Lines after the first are considered continuations if they
-// begin with a space or tab character.  In the returned data,
+// begin with a space or tab character. In the returned data,
 // continuation lines are separated from the previous line
 // only by a single space: the newline and leading white space
 // are removed.
@@ -129,12 +129,13 @@ func (r *Reader) readContinuedLineSlice() ([]byte, error) {
 	}
 
 	// Optimistically assume that we have started to buffer the next line
-	// and it starts with an ASCII letter (the next header key), so we can
-	// avoid copying that buffered data around in memory and skipping over
-	// non-existent whitespace.
+	// and it starts with an ASCII letter (the next header key), or a blank
+	// line, so we can avoid copying that buffered data around in memory
+	// and skipping over non-existent whitespace.
 	if r.R.Buffered() > 1 {
-		peek, err := r.R.Peek(1)
-		if err == nil && isASCIILetter(peek[0]) {
+		peek, _ := r.R.Peek(2)
+		if len(peek) > 0 && (isASCIILetter(peek[0]) || peek[0] == '\n') ||
+			len(peek) == 2 && peek[0] == '\r' && peek[1] == '\n' {
 			return trim(line), nil
 		}
 	}
@@ -204,7 +205,7 @@ func parseCodeLine(line string, expectCode int) (code int, continued bool, messa
 // ReadCodeLine reads a response code line of the form
 //	code message
 // where code is a three-digit status code and the message
-// extends to the rest of the line.  An example of such a line is:
+// extends to the rest of the line. An example of such a line is:
 //	220 plan9.bell-labs.com ESMTP
 //
 // If the prefix of the status does not match the digits in expectCode,
@@ -236,7 +237,7 @@ func (r *Reader) ReadCodeLine(expectCode int) (code int, message string, err err
 // with the same code followed by a space. Each line in message is
 // separated by a newline (\n).
 //
-// See page 36 of RFC 959 (http://www.ietf.org/rfc/rfc959.txt) for
+// See page 36 of RFC 959 (https://www.ietf.org/rfc/rfc959.txt) for
 // details of another form of response accepted:
 //
 //  code-message line 1
@@ -366,7 +367,7 @@ func (d *dotReader) Read(b []byte) (n int, err error) {
 				d.state = stateBeginLine
 				break
 			}
-			// Not part of \r\n.  Emit saved \r
+			// Not part of \r\n. Emit saved \r
 			br.UnreadByte()
 			c = '\r'
 			d.state = stateData
@@ -476,15 +477,25 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 	}
 
 	m := make(MIMEHeader, hint)
+
+	// The first line cannot start with a leading space.
+	if buf, err := r.R.Peek(1); err == nil && (buf[0] == ' ' || buf[0] == '\t') {
+		line, err := r.readLineSlice()
+		if err != nil {
+			return m, err
+		}
+		return m, ProtocolError("malformed MIME header initial line: " + string(line))
+	}
+
 	for {
 		kv, err := r.readContinuedLineSlice()
 		if len(kv) == 0 {
 			return m, err
 		}
 
-		// Key ends at first colon; should not have spaces but
-		// they appear in the wild, violating specs, so we
-		// remove them if present.
+		// Key ends at first colon; should not have trailing spaces
+		// but they appear in the wild, violating specs, so we remove
+		// them if present.
 		i := bytes.IndexByte(kv, ':')
 		if i < 0 {
 			return m, ProtocolError("malformed MIME header line: " + string(kv))
@@ -552,9 +563,9 @@ func (r *Reader) upcomingHeaderNewlines() (n int) {
 }
 
 // CanonicalMIMEHeaderKey returns the canonical format of the
-// MIME header key s.  The canonicalization converts the first
+// MIME header key s. The canonicalization converts the first
 // letter and any letter following a hyphen to upper case;
-// the rest are converted to lowercase.  For example, the
+// the rest are converted to lowercase. For example, the
 // canonical key for "accept-encoding" is "Accept-Encoding".
 // MIME header keys are assumed to be ASCII only.
 // If s contains a space or invalid header field bytes, it is
@@ -581,18 +592,14 @@ func CanonicalMIMEHeaderKey(s string) string {
 const toLower = 'a' - 'A'
 
 // validHeaderFieldByte reports whether b is a valid byte in a header
-// field key. This is actually stricter than RFC 7230, which says:
+// field name. RFC 7230 says:
+//   header-field   = field-name ":" OWS field-value OWS
+//   field-name     = token
 //   tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
 //           "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
 //   token = 1*tchar
-// TODO: revisit in Go 1.6+ and possibly expand this. But note that many
-// servers have historically dropped '_' to prevent ambiguities when mapping
-// to CGI environment variables.
 func validHeaderFieldByte(b byte) bool {
-	return ('A' <= b && b <= 'Z') ||
-		('a' <= b && b <= 'z') ||
-		('0' <= b && b <= '9') ||
-		b == '-'
+	return int(b) < len(isTokenTable) && isTokenTable[b]
 }
 
 // canonicalMIMEHeaderKey is like CanonicalMIMEHeaderKey but is
@@ -681,4 +688,86 @@ func init() {
 	} {
 		commonHeader[v] = v
 	}
+}
+
+// isTokenTable is a copy of net/http/lex.go's isTokenTable.
+// See https://httpwg.github.io/specs/rfc7230.html#rule.token.separators
+var isTokenTable = [127]bool{
+	'!':  true,
+	'#':  true,
+	'$':  true,
+	'%':  true,
+	'&':  true,
+	'\'': true,
+	'*':  true,
+	'+':  true,
+	'-':  true,
+	'.':  true,
+	'0':  true,
+	'1':  true,
+	'2':  true,
+	'3':  true,
+	'4':  true,
+	'5':  true,
+	'6':  true,
+	'7':  true,
+	'8':  true,
+	'9':  true,
+	'A':  true,
+	'B':  true,
+	'C':  true,
+	'D':  true,
+	'E':  true,
+	'F':  true,
+	'G':  true,
+	'H':  true,
+	'I':  true,
+	'J':  true,
+	'K':  true,
+	'L':  true,
+	'M':  true,
+	'N':  true,
+	'O':  true,
+	'P':  true,
+	'Q':  true,
+	'R':  true,
+	'S':  true,
+	'T':  true,
+	'U':  true,
+	'W':  true,
+	'V':  true,
+	'X':  true,
+	'Y':  true,
+	'Z':  true,
+	'^':  true,
+	'_':  true,
+	'`':  true,
+	'a':  true,
+	'b':  true,
+	'c':  true,
+	'd':  true,
+	'e':  true,
+	'f':  true,
+	'g':  true,
+	'h':  true,
+	'i':  true,
+	'j':  true,
+	'k':  true,
+	'l':  true,
+	'm':  true,
+	'n':  true,
+	'o':  true,
+	'p':  true,
+	'q':  true,
+	'r':  true,
+	's':  true,
+	't':  true,
+	'u':  true,
+	'v':  true,
+	'w':  true,
+	'x':  true,
+	'y':  true,
+	'z':  true,
+	'|':  true,
+	'~':  true,
 }

@@ -14,10 +14,12 @@
 // possible.
 //
 // Two sets of interfaces are included in this package. When a more abstract
-// interface isn't neccessary, there are functions for encrypting/decrypting
+// interface isn't necessary, there are functions for encrypting/decrypting
 // with v1.5/OAEP and signing/verifying with v1.5/PSS. If one needs to abstract
 // over the public-key primitive, the PrivateKey struct implements the
 // Decrypter and Signer interfaces from the crypto package.
+//
+// The RSA operations in this package are not implemented using constant-time algorithms.
 package rsa
 
 import (
@@ -27,7 +29,10 @@ import (
 	"errors"
 	"hash"
 	"io"
+	"math"
 	"math/big"
+
+	"crypto/internal/randutil"
 )
 
 var bigZero = big.NewInt(0)
@@ -37,6 +42,12 @@ var bigOne = big.NewInt(1)
 type PublicKey struct {
 	N *big.Int // modulus
 	E int      // public exponent
+}
+
+// Size returns the modulus size in bytes. Raw signatures and ciphertexts
+// for or by this public key will have the same size.
+func (pub *PublicKey) Size() int {
+	return (pub.N.BitLen() + 7) / 8
 }
 
 // OAEPOptions is an interface for passing options to OAEP decryption using the
@@ -59,7 +70,7 @@ var (
 // We require pub.E to fit into a 32-bit integer so that we
 // do not have different behavior depending on whether
 // int is 32 or 64 bits. See also
-// http://www.imperialviolet.org/2012/03/16/rsae.html.
+// https://www.imperialviolet.org/2012/03/16/rsae.html.
 func checkPub(pub *PublicKey) error {
 	if pub.N == nil {
 		return errPublicModulus
@@ -89,17 +100,19 @@ func (priv *PrivateKey) Public() crypto.PublicKey {
 	return &priv.PublicKey
 }
 
-// Sign signs msg with priv, reading randomness from rand. If opts is a
+// Sign signs digest with priv, reading randomness from rand. If opts is a
 // *PSSOptions then the PSS algorithm will be used, otherwise PKCS#1 v1.5 will
-// be used. This method is intended to support keys where the private part is
-// kept in, for example, a hardware module. Common uses should use the Sign*
-// functions in this package.
-func (priv *PrivateKey) Sign(rand io.Reader, msg []byte, opts crypto.SignerOpts) ([]byte, error) {
+// be used.
+//
+// This method implements crypto.Signer, which is an interface to support keys
+// where the private part is kept in, for example, a hardware module. Common
+// uses should use the Sign* functions in this package directly.
+func (priv *PrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	if pssOpts, ok := opts.(*PSSOptions); ok {
-		return SignPSS(rand, priv, pssOpts.Hash, msg, pssOpts)
+		return SignPSS(rand, priv, pssOpts.Hash, digest, pssOpts)
 	}
 
-	return SignPKCS1v15(rand, priv, opts.HashFunc(), msg)
+	return SignPKCS1v15(rand, priv, opts.HashFunc(), digest)
 }
 
 // Decrypt decrypts ciphertext with priv. If opts is nil or of type
@@ -191,7 +204,7 @@ func (priv *PrivateKey) Validate() error {
 
 // GenerateKey generates an RSA keypair of the given bit size using the
 // random source random (for example, crypto/rand.Reader).
-func GenerateKey(random io.Reader, bits int) (priv *PrivateKey, err error) {
+func GenerateKey(random io.Reader, bits int) (*PrivateKey, error) {
 	return GenerateMultiPrimeKey(random, 2, bits)
 }
 
@@ -206,12 +219,29 @@ func GenerateKey(random io.Reader, bits int) (priv *PrivateKey, err error) {
 //
 // [1] US patent 4405829 (1972, expired)
 // [2] http://www.cacr.math.uwaterloo.ca/techreports/2006/cacr2006-16.pdf
-func GenerateMultiPrimeKey(random io.Reader, nprimes int, bits int) (priv *PrivateKey, err error) {
-	priv = new(PrivateKey)
+func GenerateMultiPrimeKey(random io.Reader, nprimes int, bits int) (*PrivateKey, error) {
+	randutil.MaybeReadByte(random)
+
+	priv := new(PrivateKey)
 	priv.E = 65537
 
 	if nprimes < 2 {
 		return nil, errors.New("crypto/rsa: GenerateMultiPrimeKey: nprimes must be >= 2")
+	}
+
+	if bits < 64 {
+		primeLimit := float64(uint64(1) << uint(bits/nprimes))
+		// pi approximates the number of primes less than primeLimit
+		pi := primeLimit / (math.Log(primeLimit) - 1)
+		// Generated primes start with 11 (in binary) so we can only
+		// use a quarter of them.
+		pi /= 4
+		// Use a factor of two to ensure that key generation terminates
+		// in a reasonable amount of time.
+		pi /= 2
+		if pi <= float64(nprimes) {
+			return nil, errors.New("crypto/rsa: too few primes of given length to generate an RSA key")
+		}
 	}
 
 	primes := make([]*big.Int, nprimes)
@@ -234,6 +264,7 @@ NextSetOfPrimes:
 			todo += (nprimes - 2) / 5
 		}
 		for i := 0; i < nprimes; i++ {
+			var err error
 			primes[i], err = rand.Prime(random, todo/(nprimes-i))
 			if err != nil {
 				return nil, err
@@ -265,25 +296,19 @@ NextSetOfPrimes:
 			continue NextSetOfPrimes
 		}
 
-		g := new(big.Int)
 		priv.D = new(big.Int)
-		y := new(big.Int)
 		e := big.NewInt(int64(priv.E))
-		g.GCD(priv.D, y, e, totient)
+		ok := priv.D.ModInverse(e, totient)
 
-		if g.Cmp(bigOne) == 0 {
-			if priv.D.Sign() < 0 {
-				priv.D.Add(priv.D, totient)
-			}
+		if ok != nil {
 			priv.Primes = primes
 			priv.N = n
-
 			break
 		}
 	}
 
 	priv.Precompute()
-	return
+	return priv, nil
 }
 
 // incCounter increments a four byte, big-endian counter.
@@ -346,17 +371,16 @@ func encrypt(c *big.Int, pub *PublicKey, m *big.Int) *big.Int {
 // values could be used to ensure that a ciphertext for one purpose cannot be
 // used for another by an attacker. If not required it can be empty.
 //
-// The message must be no longer than the length of the public modulus less
-// twice the hash length plus 2.
-func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, label []byte) (out []byte, err error) {
+// The message must be no longer than the length of the public modulus minus
+// twice the hash length, minus a further 2.
+func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, label []byte) ([]byte, error) {
 	if err := checkPub(pub); err != nil {
 		return nil, err
 	}
 	hash.Reset()
-	k := (pub.N.BitLen() + 7) / 8
+	k := pub.Size()
 	if len(msg) > k-2*hash.Size()-2 {
-		err = ErrMessageTooLong
-		return
+		return nil, ErrMessageTooLong
 	}
 
 	hash.Write(label)
@@ -371,9 +395,9 @@ func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, l
 	db[len(db)-len(msg)-1] = 1
 	copy(db[len(db)-len(msg):], msg)
 
-	_, err = io.ReadFull(random, seed)
+	_, err := io.ReadFull(random, seed)
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	mgf1XOR(db, hash, seed)
@@ -382,7 +406,7 @@ func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, l
 	m := new(big.Int)
 	m.SetBytes(em)
 	c := encrypt(new(big.Int), pub, m)
-	out = c.Bytes()
+	out := c.Bytes()
 
 	if len(out) < k {
 		// If the output is too small, we need to left-pad with zeros.
@@ -391,7 +415,7 @@ func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, l
 		out = t
 	}
 
-	return
+	return out, nil
 }
 
 // ErrDecryption represents a failure to decrypt a message.
@@ -401,30 +425,6 @@ var ErrDecryption = errors.New("crypto/rsa: decryption error")
 // ErrVerification represents a failure to verify a signature.
 // It is deliberately vague to avoid adaptive attacks.
 var ErrVerification = errors.New("crypto/rsa: verification error")
-
-// modInverse returns ia, the inverse of a in the multiplicative group of prime
-// order n. It requires that a be a member of the group (i.e. less than n).
-func modInverse(a, n *big.Int) (ia *big.Int, ok bool) {
-	g := new(big.Int)
-	x := new(big.Int)
-	y := new(big.Int)
-	g.GCD(x, y, a, n)
-	if g.Cmp(bigOne) != 0 {
-		// In this case, a and n aren't coprime and we cannot calculate
-		// the inverse. This happens because the values of n are nearly
-		// prime (being the product of two primes) rather than truly
-		// prime.
-		return
-	}
-
-	if x.Cmp(bigOne) < 0 {
-		// 0 is not the multiplicative inverse of any element so, if x
-		// < 1, then x is negative.
-		x.Add(x, n)
-	}
-
-	return x, true
-}
 
 // Precompute performs some calculations that speed up private key operations
 // in the future.
@@ -471,13 +471,15 @@ func decrypt(random io.Reader, priv *PrivateKey, c *big.Int) (m *big.Int, err er
 
 	var ir *big.Int
 	if random != nil {
+		randutil.MaybeReadByte(random)
+
 		// Blinding enabled. Blinding involves multiplying c by r^e.
 		// Then the decryption operation performs (m^e * r^e)^d mod n
 		// which equals mr mod n. The factor of r can then be removed
 		// by multiplying by the multiplicative inverse of r.
 
 		var r *big.Int
-
+		ir = new(big.Int)
 		for {
 			r, err = rand.Int(random, priv.N)
 			if err != nil {
@@ -486,9 +488,8 @@ func decrypt(random io.Reader, priv *PrivateKey, c *big.Int) (m *big.Int, err er
 			if r.Cmp(bigZero) == 0 {
 				r = bigOne
 			}
-			var ok bool
-			ir, ok = modInverse(r, priv.N)
-			if ok {
+			ok := ir.ModInverse(r, priv.N)
+			if ok != nil {
 				break
 			}
 		}
@@ -565,22 +566,21 @@ func decryptAndCheck(random io.Reader, priv *PrivateKey, c *big.Int) (m *big.Int
 //
 // The label parameter must match the value given when encrypting. See
 // EncryptOAEP for details.
-func DecryptOAEP(hash hash.Hash, random io.Reader, priv *PrivateKey, ciphertext []byte, label []byte) (msg []byte, err error) {
+func DecryptOAEP(hash hash.Hash, random io.Reader, priv *PrivateKey, ciphertext []byte, label []byte) ([]byte, error) {
 	if err := checkPub(&priv.PublicKey); err != nil {
 		return nil, err
 	}
-	k := (priv.N.BitLen() + 7) / 8
+	k := priv.Size()
 	if len(ciphertext) > k ||
 		k < hash.Size()*2+2 {
-		err = ErrDecryption
-		return
+		return nil, ErrDecryption
 	}
 
 	c := new(big.Int).SetBytes(ciphertext)
 
 	m, err := decrypt(random, priv, c)
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	hash.Write(label)
@@ -628,12 +628,10 @@ func DecryptOAEP(hash hash.Hash, random io.Reader, priv *PrivateKey, ciphertext 
 	}
 
 	if firstByteIsZero&lHash2Good&^invalid&^lookingForIndex != 1 {
-		err = ErrDecryption
-		return
+		return nil, ErrDecryption
 	}
 
-	msg = rest[index+1:]
-	return
+	return rest[index+1:], nil
 }
 
 // leftPad returns a new slice of length size. The contents of input are right

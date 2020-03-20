@@ -1,5 +1,5 @@
 /* Output routines for Motorola MCore processor
-   Copyright (C) 1993-2016 Free Software Foundation, Inc.
+   Copyright (C) 1993-2019 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -17,6 +17,8 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
+#define IN_TARGET_CODE 1
+
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -25,8 +27,10 @@
 #include "rtl.h"
 #include "tree.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "stringpool.h"
+#include "attribs.h"
 #include "emit-rtl.h"
 #include "diagnostic-core.h"
 #include "stor-layout.h"
@@ -97,7 +101,7 @@ static const char *     output_inline_const     (machine_mode, rtx *);
 static void       layout_mcore_frame            (struct mcore_frame *);
 static void       mcore_setup_incoming_varargs	(cumulative_args_t, machine_mode, tree, int *, int);
 static cond_type  is_cond_candidate             (rtx);
-static rtx_insn  *emit_new_cond_insn            (rtx, int);
+static rtx_insn  *emit_new_cond_insn            (rtx_insn *, int);
 static rtx_insn  *conditionalize_block          (rtx_insn *);
 static void       conditionalize_optimization   (void);
 static void       mcore_reorg                   (void);
@@ -142,18 +146,20 @@ static void       mcore_option_override		(void);
 static bool       mcore_legitimate_constant_p   (machine_mode, rtx);
 static bool	  mcore_legitimate_address_p	(machine_mode, rtx, bool,
 						 addr_space_t);
+static bool	  mcore_hard_regno_mode_ok	(unsigned int, machine_mode);
+static bool	  mcore_modes_tieable_p		(machine_mode, machine_mode);
 
 /* MCore specific attributes.  */
 
 static const struct attribute_spec mcore_attribute_table[] =
 {
-  /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
-  { "dllexport", 0, 0, true,  false, false, NULL, false },
-  { "dllimport", 0, 0, true,  false, false, NULL, false },
-  { "naked",     0, 0, true,  false, false, mcore_handle_naked_attribute,
-    false },
-  { NULL,        0, 0, false, false, false, NULL, false }
+  /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
+       affects_type_identity, handler, exclude } */
+  { "dllexport", 0, 0, true,  false, false, false, NULL, NULL },
+  { "dllimport", 0, 0, true,  false, false, false, NULL, NULL },
+  { "naked",     0, 0, true,  false, false, false,
+    mcore_handle_naked_attribute, NULL },
+  { NULL,        0, 0, false, false, false, false, NULL, NULL }
 };
 
 /* Initialize the GCC target structure.  */
@@ -232,8 +238,23 @@ static const struct attribute_spec mcore_attribute_table[] =
 #undef TARGET_ADDR_SPACE_LEGITIMATE_ADDRESS_P
 #define TARGET_ADDR_SPACE_LEGITIMATE_ADDRESS_P mcore_legitimate_address_p
 
+#undef TARGET_LRA_P
+#define TARGET_LRA_P hook_bool_void_false
+
 #undef TARGET_WARN_FUNC_RETURN
 #define TARGET_WARN_FUNC_RETURN mcore_warn_func_return
+
+#undef TARGET_HARD_REGNO_MODE_OK
+#define TARGET_HARD_REGNO_MODE_OK mcore_hard_regno_mode_ok
+
+#undef TARGET_MODES_TIEABLE_P
+#define TARGET_MODES_TIEABLE_P mcore_modes_tieable_p
+
+#undef TARGET_CONSTANT_ALIGNMENT
+#define TARGET_CONSTANT_ALIGNMENT constant_alignment_word_strings
+
+#undef  TARGET_HAVE_SPECULATION_SAFE_VALUE
+#define TARGET_HAVE_SPECULATION_SAFE_VALUE speculation_safe_value_not_needed
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 
@@ -607,7 +628,7 @@ mcore_gen_compare (enum rtx_code code, rtx op0, rtx op1)
     case EQ:	/* Use inverted condition, cmpne.  */
       code = NE;
       invert = true;
-      /* Drop through.  */
+      /* FALLTHRU */
       
     case NE:	/* Use normal condition, cmpne.  */
       if (GET_CODE (op1) == CONST_INT && ! CONST_OK_FOR_K (INTVAL (op1)))
@@ -617,7 +638,7 @@ mcore_gen_compare (enum rtx_code code, rtx op0, rtx op1)
     case LE:	/* Use inverted condition, reversed cmplt.  */
       code = GT;
       invert = true;
-      /* Drop through.  */
+      /* FALLTHRU */
       
     case GT:	/* Use normal condition, reversed cmplt.  */
       if (GET_CODE (op1) == CONST_INT)
@@ -627,7 +648,7 @@ mcore_gen_compare (enum rtx_code code, rtx op0, rtx op1)
     case GE:	/* Use inverted condition, cmplt.  */
       code = LT;
       invert = true;
-      /* Drop through.  */
+      /* FALLTHRU */
       
     case LT:	/* Use normal condition, cmplt.  */
       if (GET_CODE (op1) == CONST_INT && 
@@ -642,7 +663,7 @@ mcore_gen_compare (enum rtx_code code, rtx op0, rtx op1)
       gcc_assert (GET_CODE (op1) != CONST_INT || INTVAL (op1) != 0);
       code = LEU;
       invert = true;
-      /* Drop through.  */
+      /* FALLTHRU */
       
     case LEU:	/* Use normal condition, reversed cmphs.  */
       if (GET_CODE (op1) == CONST_INT && INTVAL (op1) != 0)
@@ -652,7 +673,7 @@ mcore_gen_compare (enum rtx_code code, rtx op0, rtx op1)
     case LTU:	/* Use inverted condition, cmphs.  */
       code = GEU;
       invert = true;
-      /* Drop through.  */
+      /* FALLTHRU */
       
     case GEU:	/* Use normal condition, cmphs.  */
       if (GET_CODE (op1) == CONST_INT && INTVAL (op1) != 0)
@@ -1277,11 +1298,11 @@ mcore_output_move (rtx insn ATTRIBUTE_UNUSED, rtx operands[],
 	  else
 	    switch (GET_MODE (src))		/* r-m */
 	      {
-	      case SImode:
+	      case E_SImode:
 		return "ldw\t%0,%1";
-	      case HImode:
+	      case E_HImode:
 		return "ld.h\t%0,%1";
-	      case QImode:
+	      case E_QImode:
 		return "ld.b\t%0,%1";
 	      default:
 		gcc_unreachable ();
@@ -1308,11 +1329,11 @@ mcore_output_move (rtx insn ATTRIBUTE_UNUSED, rtx operands[],
   else if (GET_CODE (dst) == MEM)               /* m-r */
     switch (GET_MODE (dst))
       {
-      case SImode:
+      case E_SImode:
 	return "stw\t%1,%0";
-      case HImode:
+      case E_HImode:
 	return "st.h\t%1,%0";
-      case QImode:
+      case E_QImode:
 	return "st.b\t%1,%0";
       default:
 	gcc_unreachable ();
@@ -2323,7 +2344,7 @@ is_cond_candidate (rtx insn)
    new one.  Return the new insn if emitted.  */
 
 static rtx_insn *
-emit_new_cond_insn (rtx insn, int cond)
+emit_new_cond_insn (rtx_insn *insn, int cond)
 {
   rtx c_insn = 0;
   rtx pat, dst, src;
@@ -3255,3 +3276,22 @@ mcore_legitimate_address_p (machine_mode mode, rtx x, bool strict_p,
   return false;
 }
 
+/* Implement TARGET_HARD_REGNO_MODE_OK.  We may keep double values in
+   even registers.  */
+
+static bool
+mcore_hard_regno_mode_ok (unsigned int regno, machine_mode mode)
+{
+  if (TARGET_8ALIGN && GET_MODE_SIZE (mode) > UNITS_PER_WORD)
+    return (regno & 1) == 0;
+
+  return regno < 18;
+}
+
+/* Implement TARGET_MODES_TIEABLE_P.  */
+
+static bool
+mcore_modes_tieable_p (machine_mode mode1, machine_mode mode2)
+{
+  return mode1 == mode2 || GET_MODE_CLASS (mode1) == GET_MODE_CLASS (mode2);
+}

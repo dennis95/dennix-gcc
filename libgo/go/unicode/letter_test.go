@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	. "unicode"
 )
@@ -73,7 +74,6 @@ var letterTest = []rune{
 	0x1200,
 	0x1312,
 	0x1401,
-	0x1885,
 	0x2c00,
 	0xa800,
 	0xf900,
@@ -94,6 +94,7 @@ var notletterTest = []rune{
 	0x375,
 	0x619,
 	0x700,
+	0x1885,
 	0xfffe,
 	0x1ffff,
 	0x10ffff,
@@ -432,6 +433,10 @@ func TestSimpleFold(t *testing.T) {
 			r = out
 		}
 	}
+
+	if r := SimpleFold(-42); r != -42 {
+		t.Errorf("SimpleFold(-42) = %v, want -42", r)
+	}
 }
 
 // Running 'go test -calibrate' runs the calibration to find a plausible
@@ -545,5 +550,16 @@ func TestLatinOffset(t *testing.T) {
 				t.Errorf("%s: LatinOffset=%d, want %d", name, tab.LatinOffset, i)
 			}
 		}
+	}
+}
+
+func TestSpecialCaseNoMapping(t *testing.T) {
+	// Issue 25636
+	// no change for rune 'A', zero delta, under upper/lower/title case change.
+	var noChangeForCapitalA = CaseRange{'A', 'A', [MaxCase]rune{0, 0, 0}}
+	got := strings.ToLowerSpecial(SpecialCase([]CaseRange{noChangeForCapitalA}), "ABC")
+	want := "Abc"
+	if got != want {
+		t.Errorf("got %q; want %q", got, want)
 	}
 }

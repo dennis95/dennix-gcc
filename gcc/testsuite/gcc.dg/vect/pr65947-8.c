@@ -1,5 +1,7 @@
 /* { dg-require-effective-target vect_condition } */
 
+#include "tree-vect.h"
+
 extern void abort (void) __attribute__ ((noreturn));
 
 #define N 27
@@ -29,6 +31,8 @@ main (void)
   67, 55, 112, 22, 45, 23, 111
   };
 
+  check_vect ();
+
   int ret = condition_reduction (a, 16);
 
   if (ret != 12)
@@ -38,4 +42,4 @@ main (void)
 }
 
 /* { dg-final { scan-tree-dump-not "LOOP VECTORIZED" "vect" } } */
-/* { dg-final { scan-tree-dump "multiple types in double reduction or condition reduction" "vect" { xfail { ! vect_max_reduc } } } } */
+/* { dg-final { scan-tree-dump "multiple types in double reduction or condition reduction" "vect" } } */
