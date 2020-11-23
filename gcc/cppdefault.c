@@ -92,12 +92,6 @@ const struct default_include cpp_include_defaults[]
     { NATIVE_SYSTEM_HEADER_DIR, NATIVE_SYSTEM_HEADER_COMPONENT, 0, 0, 1, 2 },
     { NATIVE_SYSTEM_HEADER_DIR, NATIVE_SYSTEM_HEADER_COMPONENT, 0, 0, 1, 0 },
 #endif
-#ifdef TARGET_DENNIX
-    /* Backwards compatibility for versions that use /usr/include instead of
-       /include. */
-    /* TODO: Remove this when it is no longer needed. */
-    { "/usr/include", 0, 0, 0, 1, 0 },
-#endif
     { 0, 0, 0, 0, 0, 0 }
   };
 #endif /* no INCLUDE_DEFAULTS */
