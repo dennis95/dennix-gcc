@@ -708,6 +708,7 @@ case ${target} in
 *-*-dennix*)
   gas=yes
   gnu_ld=yes
+  gcc_cv_initfini_array=yes
   native_system_header_dir=/include
   ;;
 *-*-dragonfly*)
