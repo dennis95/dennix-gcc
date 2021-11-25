@@ -1,2 +1,1 @@
-CRTSTUFF_T_CFLAGS += -mcmodel=large
 HOST_LIBGCC2_CFLAGS += -mcmodel=large -mno-red-zone
