@@ -1,0 +1,6 @@
+; Additional compiler options accepted for Dennix.
+
+pthread
+Driver Ignore
+
+; This comment is to ensure we retain the blank line above.
