@@ -460,6 +460,15 @@ static const format_length_info printf_length_specs[] =
   { "j", FMT_LEN_j, STD_C99, NO_FMT, 0 },
   { "H", FMT_LEN_H, STD_EXT, NO_FMT, 0 },
   { "D", FMT_LEN_D, STD_EXT, "DD", FMT_LEN_DD, STD_EXT, 0 },
+  // The %w length modifier. These entries assume the sizes of the types.
+  { "w8", FMT_LEN_hh, STD_EXT, NO_FMT, 1 },
+  { "w16", FMT_LEN_h, STD_EXT, NO_FMT, 1 },
+  { "w32", FMT_LEN_none, STD_EXT, NO_FMT, 1 },
+  { "w64", FMT_LEN_ll, STD_EXT, NO_FMT, 1 },
+  { "wf8", FMT_LEN_none, STD_EXT, NO_FMT, 1 },
+  { "wf16", FMT_LEN_none, STD_EXT, NO_FMT, 1 },
+  { "wf32", FMT_LEN_none, STD_EXT, NO_FMT, 1 },
+  { "wf64", FMT_LEN_ll, STD_EXT, NO_FMT, 1 },
   { NO_FMT, NO_FMT, 0 }
 };
 
@@ -497,6 +506,15 @@ static const format_length_info scanf_length_specs[] =
   { "j", FMT_LEN_j, STD_C99, NO_FMT, 0 },
   { "H", FMT_LEN_H, STD_EXT, NO_FMT, 0 },
   { "D", FMT_LEN_D, STD_EXT, "DD", FMT_LEN_DD, STD_EXT, 0 },
+  // The %w length modifier. These entries assume the sizes of the types.
+  { "w8", FMT_LEN_hh, STD_EXT, NO_FMT, 1 },
+  { "w16", FMT_LEN_h, STD_EXT, NO_FMT, 1 },
+  { "w32", FMT_LEN_none, STD_EXT, NO_FMT, 1 },
+  { "w64", FMT_LEN_ll, STD_EXT, NO_FMT, 1 },
+  { "wf8", FMT_LEN_none, STD_EXT, NO_FMT, 1 },
+  { "wf16", FMT_LEN_none, STD_EXT, NO_FMT, 1 },
+  { "wf32", FMT_LEN_none, STD_EXT, NO_FMT, 1 },
+  { "wf64", FMT_LEN_ll, STD_EXT, NO_FMT, 1 },
   { NO_FMT, NO_FMT, 0 }
 };
 
@@ -680,6 +698,7 @@ static const format_char_info print_char_table[] =
   { "S",   1, STD_EXT, { TEX_W,   BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN }, "-wp",       "R",  NULL },
   /* GNU conversion specifiers.  */
   { "m",   0, STD_EXT, { T89_V,   BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN }, "-wp",       "",   NULL },
+  { "bB",  0, STD_EXT, { T89_UI,  T99_UC,  T89_US,  T89_UL,  T9L_ULL, TEX_ULL, T99_ST,  T99_UPD, T99_UIM, BADLEN,  BADLEN,  BADLEN }, "-wp0#",     "i",  NULL },
   { NULL,  0, STD_C89, NOLENGTHS, NULL, NULL, NULL }
 };
 
@@ -851,6 +870,7 @@ static const format_char_info scan_char_table[] =
   /* X/Open conversion specifiers.  */
   { "C",     1, STD_EXT, { TEX_W,   BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN }, "*mw",   "W",   NULL },
   { "S",     1, STD_EXT, { TEX_W,   BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN,  BADLEN }, "*amw",  "W",   NULL },
+  { "bB",    1, STD_EXT, { T89_UI,  T99_UC,  T89_US,  T89_UL,  T9L_ULL, TEX_ULL, T99_ST,  T99_UPD, T99_UIM, BADLEN,  BADLEN,  BADLEN }, "*w",    "W",   NULL },
   { NULL, 0, STD_C89, NOLENGTHS, NULL, NULL, NULL }
 };
 

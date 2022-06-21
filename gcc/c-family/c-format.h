@@ -86,9 +86,7 @@ enum
    possibly a doubled version such as "hh".  */
 struct format_length_info
 {
-  /* Name of the single-character length modifier. If prefixed by
-     a zero character, it describes a multi character length
-     modifier, like I64, I32, etc.  */
+  /* Name of the single-character length modifier.  */
   const char *name;
   /* Index into a format_char_info.types array.  */
   enum format_lengths index;
