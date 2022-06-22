@@ -5952,6 +5952,8 @@ AC_CACHE_CHECK(__stack_chk_fail in target C library,
     gcc_cv_libc_provides_ssp=no
   else
     case "$target" in
+       *-*-dennix*)
+         gcc_cv_libc_provides_ssp=yes;;
        *-*-musl*)
 	 # All versions of musl provide stack protector
 	 gcc_cv_libc_provides_ssp=yes;;
