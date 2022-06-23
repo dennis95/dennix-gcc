@@ -10,6 +10,9 @@
 #undef ENDFILE_SPEC
 #define ENDFILE_SPEC ""
 
+#undef LIBUBSAN_SPEC
+#define LIBUBSAN_SPEC ""
+
 #undef TARGET_OS_CPP_BUILTINS
 #define TARGET_OS_CPP_BUILTINS() \
   do { \
