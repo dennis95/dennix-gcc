@@ -26,6 +26,14 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #ifndef GCC_GTHR_POSIX_H
 #define GCC_GTHR_POSIX_H
 
+#ifdef __dennix__
+/* The use of weak references to detect whether threads are used is broken and
+   fails to properly detect threads. Turn it off to avoid building
+   thread-unsafe binaries. */
+# undef GTHREAD_USE_WEAK
+# define GTHREAD_USE_WEAK 0
+#endif
+
 /* POSIX threads specific definitions.
    Easy, since the interface is just one-to-one mapping.  */
 
@@ -108,7 +116,7 @@ __gthrw(pthread_join)
 __gthrw(pthread_equal)
 __gthrw(pthread_self)
 __gthrw(pthread_detach)
-#ifndef __BIONIC__
+#if !defined(__BIONIC__) && !defined(__dennix__)
 __gthrw(pthread_cancel)
 #endif
 __gthrw(sched_yield)

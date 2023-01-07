@@ -711,6 +711,7 @@ case ${target} in
   gcc_cv_initfini_array=yes
   native_system_header_dir=/include
   extra_options="${extra_options} dennix.opt"
+  thread_file='posix'
   ;;
 *-*-dragonfly*)
   gas=yes
